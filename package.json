@@ -19,6 +19,7 @@
     "@deck.gl/geo-layers": "~8.5.10",
     "@deck.gl/layers": "~8.5.10",
     "@deck.gl/mapbox": "~8.5.10",
+    "@deck.gl/mesh-layers": "~8.5.10",
     "@loaders.gl/3d-tiles": "~3.0.12",
     "@luma.gl/shadertools": "~8.5.10"
   },
