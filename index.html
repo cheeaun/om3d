@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL JS</title>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="warning">
+      <h1>Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL&nbsp;JS</h1>
+      <p>
+        This is a demo of Singapore buildings 3D tiles from
+        <a href="https://www.onemap3d.gov.sg/" target="_blank">OneMap 3D</a> on
+        Mapbox GL JS.
+      </p>
+      <p>
+        <strong
+          >WARNING: This demo makes a lot of requests and use up a lot of
+          bandwidth (up to 30+ MB on first load, subsequently may go up to 100+
+          MB).
+        </strong>
+      </p>
+      <button id="start-button">Okay, let's look at this!</button>
+    </div>
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.5.1/mapbox-gl.js"></script>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

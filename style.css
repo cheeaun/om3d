@@ -1,0 +1,93 @@
+@import url(https://api.mapbox.com/mapbox-gl-js/v2.5.1/mapbox-gl.css);
+
+* {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,
+    Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol';
+}
+
+h1,
+p {
+  background: linear-gradient(
+    160deg,
+    rgba(0, 0, 0, 0.4),
+    #000,
+    rgba(0, 0, 0, 0.6)
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 2px 30px rgba(0, 0, 0, 0.3), 1px 1px 3px rgba(0, 0, 0, 0.1);
+  -webkit-text-stroke: 0.5px black;
+}
+
+a {
+  text-underline-offset: 1px;
+  text-decoration-thickness: 2px;
+}
+
+p {
+  line-height: 1.5;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+#map {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+}
+
+#warning {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1em;
+}
+
+#warning:before {
+  pointer-events: none;
+  z-index: -1;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  content: '';
+  background-color: rgba(255, 255, 255, 0.5);
+  -webkit-mask: linear-gradient(black 25%, transparent);
+  mask: linear-gradient(black 25%, transparent);
+  -webkit-backdrop-filter: blur(30px) saturate(2);
+  backdrop-filter: blur(30px) saturate(2);
+}
+
+#warning > * {
+  max-width: 600px;
+}
+
+#warning button {
+  padding: 1em 2em;
+  font-weight: bold;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 999px;
+  border: 0;
+  background-color: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(30px) saturate(2);
+  box-shadow: 2px 2px 20px rgba(255, 255, 255, 0.5), inset 0 1px 2px #fff;
+  cursor: pointer;
+  transition: all 0.1s ease-in-out;
+}
+#warning button:hover,
+#warning button:focus {
+  background-color: rgba(255, 255, 255, 0.9);
+}
+#warning button:active {
+  transform: scale(0.95);
+  background-color: rgba(0, 0, 0, 0.1);
+}
