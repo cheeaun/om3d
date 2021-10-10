@@ -17,7 +17,7 @@ npm start
 # Roughly 700-800 MB
 npm run fetch-tiles
 
-# Generate optimize tiles into ./optimized-tiles/*
+# Generate optimized tiles into ./optimized-tiles/*
 # Roughly 50-60 MB
 npm run optimize-tiles
 ```
