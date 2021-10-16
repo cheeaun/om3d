@@ -1,7 +1,7 @@
 Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL JS
 ===
 
-[![Screenshot of demo site](screenshot.jpg)](https://cheeaun.github.io/om3d/)
+[![Screenshot of demo site](screenshot.jpg)](https://om3d.netlify.app/)
 
 This is a demo of Singapore buildings 3D tiles from [OneMap 3D](https://www.onemap3d.gov.sg/) on Mapbox GL JS.
 
