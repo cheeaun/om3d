@@ -2,5 +2,10 @@
 .vscode
 node_modules
 dist
+# Raw sources and local backups
 tiles
-optimized-tiles/data/*.glb
+tiles-old
+tiles2
+optimized-tiles-old
+# Intermediate GLBs; the final B3DM tileset is tracked
+optimized-tiles/**/*.glb

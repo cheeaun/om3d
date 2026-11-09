@@ -1,16 +1,43 @@
+import 'mapbox-gl/dist/mapbox-gl.css';
 import './style.css';
 
+import mapboxgl from 'mapbox-gl';
 import { AmbientLight, DirectionalLight, LightingEffect } from '@deck.gl/core';
-import { MapboxLayer } from '@deck.gl/mapbox';
+import { MapboxOverlay } from '@deck.gl/mapbox';
 import { Tile3DLayer } from '@deck.gl/geo-layers';
 import { Tiles3DLoader } from '@loaders.gl/3d-tiles';
 
 const ACCESS_TOKEN =
   'pk.eyJ1IjoiY2hlZWF1biIsImEiOiJja3VsNTNvdm0xZTZkMnBuNjFwenVnZ256In0.O7gPe1raOok_uEgY-pCL4g';
 mapboxgl.accessToken = ACCESS_TOKEN;
+
+const TILESET_URL =
+  new URLSearchParams(window.location.search).get('tiles') ||
+  'optimized-tiles/tileset.json';
+
+const ambientLight = new AmbientLight({
+  intensity: 1.2,
+});
+
+const directionalLight1 = new DirectionalLight({
+  color: [228, 226, 226],
+  intensity: 2,
+  direction: [0, -1, 0.1],
+});
+const directionalLight2 = new DirectionalLight({
+  color: [228, 226, 226],
+  intensity: 0.6,
+  direction: [0, 1, 0.1],
+});
+const lightingEffect = new LightingEffect({
+  ambientLight,
+  directionalLight1,
+  directionalLight2,
+});
+
 const map = (window._map = new mapboxgl.Map({
   container: 'map',
-  style: 'mapbox://styles/mapbox/streets-v11?optimize=true',
+  style: 'mapbox://styles/mapbox/streets-v12',
   minZoom: 8,
   renderWorldCopies: false,
   hash: true,
@@ -24,66 +51,57 @@ const map = (window._map = new mapboxgl.Map({
 }));
 map.addControl(new mapboxgl.NavigationControl());
 
-const buildingsLayer = new MapboxLayer({
-  id: 'buildings-3d',
-  type: Tile3DLayer,
-  data: 'optimized-tiles/tileset.json',
-  loader: Tiles3DLoader,
-  opacity: 0.8,
-  _subLayerProps: {
-    scenegraph: {
-      getColor: [228, 226, 226],
-    },
-  },
-  loadOptions: {
-    tileset: {
-      maximumMemoryUsage: 1,
-      // Below doesn't seem to work at all
-      viewDistanceScale: 0.5,
-      updateTransforms: false,
-      maximumScreenSpaceError: 1,
-    },
-  },
+const overlay = new MapboxOverlay({
+  interleaved: true,
+  effects: [lightingEffect],
+  layers: [],
+  // Hide buildings when zoomed out without destroying the 3D tileset state.
+  layerFilter: ({ layer, viewport }) =>
+    layer.id !== 'buildings-3d' || viewport.zoom >= 13,
 });
+map.addControl(overlay);
+window._overlay = overlay;
 
-const ambientLight = new AmbientLight({
-  intensity: 8,
-});
-
-const directionalLight1 = new DirectionalLight({
-  color: [228, 226, 226],
-  intensity: 6,
-  direction: [0, -1, 0.1],
-});
-const directionalLight2 = new DirectionalLight({
-  color: [228, 226, 226],
-  intensity: 2,
-  direction: [0, 1, 0.1],
-});
-const lightingEffect = new LightingEffect({
-  ambientLight,
-  directionalLight1,
-  directionalLight2,
-});
-
-map.once('styledata', () => {
+map.once('load', () => {
   const layers = map.getStyle().layers;
   const labelLayerId = layers.find(
     (l) => l.type == 'symbol' && l.layout['text-field'],
-  ).id;
-
-  map.addLayer({
-    id: 'sky',
-    type: 'sky',
-  });
+  )?.id;
 
   const start = () => {
-    map.addLayer(buildingsLayer, labelLayerId);
-    map.setLayerZoomRange('buildings-3d', 13, 22.1);
-
-    buildingsLayer.deck.setProps({
-      effects: [lightingEffect],
+    const buildingsLayer = new Tile3DLayer({
+      id: 'buildings-3d',
+      data: TILESET_URL,
+      loaders: [Tiles3DLoader],
+      // Draw the buildings underneath the map labels.
+      beforeId: labelLayerId,
+      opacity: 1,
+      _subLayerProps: {
+        scenegraph: {
+          getColor: [255, 255, 255],
+          // The Mapbox style fills its depth buffer with near-plane values;
+          // testing against it hides the interleaved 3D layer entirely.
+          parameters: {
+            depthTest: false,
+            depthWrite: false,
+          },
+        },
+      },
+      loadOptions: {
+        tileset: {
+          // The defaults. The old values below caused constant tile
+          // reloading and far too many network requests:
+          //   maximumMemoryUsage: 1 (MB) / maximumScreenSpaceError: 1
+          maximumMemoryUsage: 64, // MB
+          maximumScreenSpaceError: 8,
+        },
+      },
+      onTileError: (tile, message, url) => {
+        console.error(`Failed to load tile ${url}: ${message}`);
+      },
     });
+
+    overlay.setProps({ layers: [buildingsLayer] });
   };
 
   document.getElementById('start-button').onclick = (e) => {

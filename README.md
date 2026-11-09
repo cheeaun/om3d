@@ -3,30 +3,76 @@ Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL JS
 
 [![Screenshot of demo site](screenshot.jpg)](https://om3d.netlify.app/)
 
-This is a demo of Singapore buildings 3D tiles from [OneMap 3D](https://www.onemap3d.gov.sg/) on Mapbox GL JS.
+This is a demo of Singapore buildings 3D tiles from [OneMap 3D](https://www.onemap.gov.sg/3d) on Mapbox GL JS.
 
 Development
 ---
+
+Requires Node.js 20.19+ (Vite 8).
 
 ``` bash
 # install dependencies
 npm i
 
-# Start local server
-npm start
+# Start local server on http://localhost:5931
+npm run dev
 
-# Download tiles from OneMap to ./tiles/*
-# Roughly 700-800 MB
-npm run fetch-tiles
+# Production build into ./dist
+npm run build
 
-# Generate optimized tiles into ./optimized-tiles/*
-# Roughly 50-60 MB
-npm run optimize-tiles
+# Preview the production build on http://localhost:5932
+npm run serve
 ```
 
-This uses [Deck.gl](https://deck.gl/)'s [Tile3DLayer](https://deck.gl/docs/api-reference/geo-layers/tile-3d-layer) to render [3D Tiles](https://www.opengeospatial.org/standards/3DTiles).
+Tiles
+---
 
-The files in `./tiles` and `./optimized-tiles/*.glb` are excluded from this repository because they takes up too much space and unnecessary for this demo.
+This uses [Deck.gl](https://deck.gl/)'s
+[Tile3DLayer](https://deck.gl/docs/api-reference/geo-layers/tile-3d-layer) to
+render [3D Tiles](https://www.ogc.org/standards/3dtiles).
+
+The raw files in `./tiles` (current) and `./tiles-old` (2021) and any
+intermediate `./optimized-tiles/**/*.glb` files are excluded from this
+repository. The optimized `.b3dm` tiles in `./optimized-tiles` are checked in;
+they are generated from the current OneMap 3D dataset with depth-8 selection,
+hole filling, and per-building simplification. The 2021 optimized snapshot is
+kept locally as the ignored `./optimized-tiles-old`.
+
+``` bash
+# Download tiles from OneMap to ./tiles/*
+# The full current dataset is enormous: check before downloading!
+npm run fetch-tiles -- --dry-run
+npm run fetch-tiles -- --max-level=5
+npm run fetch-tiles
+
+# Download the full dataset and strip the photogrammetry textures on the fly.
+# The download is still ~130–175 GB, but only ~2.3 GiB is written to disk.
+npm run fetch-tiles -- --output=tiles --strip-textures --max-bytes=5368709120
+
+# Retry tiles that failed and were written to ./tiles/failures.txt
+npm run retry-tiles -- --output=tiles
+
+# Build the simplified tileset into ./optimized-tiles
+# (depth 8 + fill, deeper MBS override, crease-preserving simplification)
+npm run build-toy-tiles
+```
+
+Append `?tiles=<path-to-tileset.json>` to the dev URL to preview another
+tileset. The page defaults to `optimized-tiles`.
+
+The current upstream dataset has ~24,600 tiles and is roughly 130–175 GB in
+total, so prefer `--dry-run` and `--max-level=N` while experimenting.
+`--strip-textures` removes the images and keeps the Draco geometry; buildings
+then render with flat gray materials. See [AGENTS.md](AGENTS.md) for the
+current endpoint, stripper behavior, and the sampling behind that estimate.
+
+### Tile size (current optimized set)
+
+| | Current (`optimized-tiles/`) |
+| --- | ---: |
+| Tiles | 6,810 |
+| Tile data | ~505 MiB |
+| Average per tile | ~75 KB |
 
 Copyright
 ---

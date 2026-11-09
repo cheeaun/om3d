@@ -1,33 +1,33 @@
 {
   "name": "om3d",
   "version": "1.0.0",
+  "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "postbuild": "cp -r ./optimized-tiles ./dist/optimized-tiles",
+    "postbuild": "node scripts/copy-tiles.mjs",
     "serve": "vite preview",
     "fetch-tiles": "node scripts/fetch-tiles.mjs",
-    "optimize-tiles": "./scripts/optimize-tiles.sh"
+    "retry-tiles": "node scripts/retry-failed-tiles.mjs",
+    "build-toy-tiles": "node scripts/build-toy-tiles-all.mjs --source=tiles --output=optimized-tiles --max-depth=8 --ratio=0.5 --error=0.005 --deep-area=103.8565,1.2800,103.8640,1.2870,15"
   },
   "author": "Lim Chee Aun <cheeaun@gmail.com>",
   "license": "ISC",
+  "engines": {
+    "node": ">=20.19"
+  },
   "devDependencies": {
-    "vite": "~2.6.4"
+    "gltfpack": "^1.3.0",
+    "vite": "^8.3.6"
   },
   "dependencies": {
-    "@deck.gl/core": "~8.5.10",
-    "@deck.gl/extensions": "~8.5.10",
-    "@deck.gl/geo-layers": "~8.5.10",
-    "@deck.gl/layers": "~8.5.10",
-    "@deck.gl/mapbox": "~8.5.10",
-    "@deck.gl/mesh-layers": "~8.5.10",
-    "@loaders.gl/3d-tiles": "~3.0.12",
-    "@luma.gl/shadertools": "~8.5.10"
-  },
-  "optionalDependencies": {
-    "3d-tiles-tools": "https://gitpkg.now.sh/CesiumGS/3d-tiles-validator/tools?main",
-    "fs-extra": "~10.0.0",
-    "gltf-pipeline": "~3.0.4",
-    "node-fetch": "~3.0.0"
+    "@deck.gl/core": "^9.4.1",
+    "@deck.gl/geo-layers": "^9.4.1",
+    "@deck.gl/mapbox": "^9.4.1",
+    "@loaders.gl/3d-tiles": "^4.5.4",
+    "@loaders.gl/core": "^4.5.4",
+    "@loaders.gl/draco": "^4.5.4",
+    "mapbox-gl": "^3.34.2"
   }
 }
