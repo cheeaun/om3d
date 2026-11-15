@@ -1,25 +1,259 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL JS</title>
+    <title>Singapore buildings 3D Tiles</title>
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <div id="map"></div>
+    <div id="status">Loading basemap…</div>
+    <div id="controls" role="toolbar" aria-label="Map options">
+      <button
+        id="settings"
+        type="button"
+        aria-label="Settings"
+        aria-expanded="false"
+        aria-controls="settings-panel"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle
+            cx="12"
+            cy="12"
+            r="3.2"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+          />
+          <path
+            d="M 18.80 9.79 L 21.38 10.51 L 21.38 13.49 L 18.80 14.21 L 18.37 15.25 L 19.69 17.58 L 17.58 19.69 L 15.25 18.37 L 14.21 18.80 L 13.49 21.38 L 10.51 21.38 L 9.79 18.80 L 8.75 18.37 L 6.42 19.69 L 4.31 17.58 L 5.63 15.25 L 5.20 14.21 L 2.62 13.49 L 2.62 10.51 L 5.20 9.79 L 5.63 8.75 L 4.31 6.42 L 6.42 4.31 L 8.75 5.63 L 9.79 5.20 L 10.51 2.62 L 13.49 2.62 L 14.21 5.20 L 15.25 5.63 L 17.58 4.31 L 19.69 6.42 L 18.37 8.75 Z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+      <div id="nav-buttons">
+        <button id="north" type="button" aria-label="Reset north">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle
+              cx="12"
+              cy="12"
+              r="9"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+            />
+            <g class="needle">
+              <path d="M12 4.5 15 12 12 19.5 9 12Z" fill="currentColor" />
+            </g>
+          </svg>
+        </button>
+        <button id="rotate-left" type="button" aria-label="Rotate left">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M4.5 8.5A8 8 0 1 1 4 14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+            <path
+              d="M3.4 4.6 4.6 9.6 9.6 8.4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button id="rotate-right" type="button" aria-label="Rotate right">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M19.5 8.5A8 8 0 1 0 20 14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+            <path
+              d="M20.6 4.6 19.4 9.6 14.4 8.4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </div>
+      <div id="tilt-buttons">
+        <button id="tilt-up" type="button" aria-label="Tilt up">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 5.5 12 18.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+            <path
+              d="M7.5 10.5 12 5.5 16.5 10.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button id="tilt-down" type="button" aria-label="Tilt down">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 5.5 12 18.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+            <path
+              d="M7.5 13.5 12 18.5 16.5 13.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div id="panels">
+      <section id="settings-panel" aria-label="Settings" hidden>
+        <div class="settings-group">
+          <span class="settings-label" id="quality-label">Quality</span>
+          <div
+            class="segmented"
+            role="radiogroup"
+            aria-labelledby="quality-label"
+          >
+            <button type="button" data-quality="low" role="radio" aria-checked="false">
+              Low
+            </button>
+            <button type="button" data-quality="medium" role="radio" aria-checked="false">
+              Medium
+            </button>
+            <button type="button" data-quality="high" role="radio" aria-checked="false">
+              High
+            </button>
+          </div>
+        </div>
+        <button id="tilt-shift" class="toggle" type="button" aria-pressed="false">
+          <span class="checkbox" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M5 12.5 10 17.5 19 7.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <span>Tilt shift</span>
+        </button>
+        <button
+          id="shadows"
+          class="toggle"
+          type="button"
+          aria-pressed="false"
+          aria-controls="sun-controls"
+        >
+          <span class="checkbox" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M5 12.5 10 17.5 19 7.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <span>Shadows</span>
+        </button>
+        <p id="quality-note" class="settings-note"></p>
+        <button id="copy-debug" class="settings-action" type="button">
+          Copy debug info
+        </button>
+        <footer class="settings-footer">
+          <a
+            href="https://github.com/cheeaun/om3d"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Source on GitHub
+          </a>
+        </footer>
+      </section>
+      <section id="sun-controls" aria-label="Sun position" hidden>
+      <div class="sun-header">
+        <span id="sun-date" class="sun-date">--</span>
+        <button
+          id="sun-reset"
+          class="sun-reset"
+          type="button"
+          aria-label="Set sun to current time"
+          title="Set sun to current time"
+        >
+          Now
+        </button>
+      </div>
+      <div class="sun-times">
+        <span>
+          <span class="sun-label">Sunrise</span>
+          <span id="sunrise-time">--:--</span>
+        </span>
+        <span>
+          <span class="sun-label">Sunset</span>
+          <span id="sunset-time">--:--</span>
+        </span>
+      </div>
+      <input
+        id="sun-slider"
+        type="range"
+        min="0"
+        max="100"
+        value="0"
+        step="1"
+        aria-label="Time of day"
+      />
+      <div class="sun-now">
+        <span class="sun-now-label">Sun</span>
+        <span id="sun-time">--:--</span>
+      </div>
+    </section>
+    </div>
+    <div id="attribution">
+      © OpenFreeMap © OpenMapTiles © OpenStreetMap · 3D tiles © SLA / OneMap
+    </div>
     <div id="warning">
-      <h1>Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL&nbsp;JS</h1>
+      <h1>Singapore buildings 3D Tiles from OneMap 3D</h1>
       <p>
-        This is a demo of Singapore buildings 3D tiles from
-        <a href="https://www.onemap.gov.sg/3d" target="_blank">OneMap 3D</a> on
-        Mapbox GL JS.
+        A demo of Singapore buildings 3D tiles from
+        <a href="https://www.onemap.gov.sg/3d" target="_blank">OneMap 3D</a>,
+        rendered with Three.js.
       </p>
       <p>
-        <strong
-          >WARNING: This demo makes a lot of requests and uses a lot of
-          bandwidth. Expect roughly 15–30 MB when the view first loads, and more
-          as you pan and zoom around the city.
+        <strong>
+          WARNING: This demo streams 3D tiles and uses a lot of bandwidth.
+          Expect roughly 10 MB when the view first loads, and more as you pan
+          and zoom around the city.
         </strong>
       </p>
       <button id="start-button">Okay, let's look at this!</button>

@@ -1,20 +1,22 @@
-Singapore buildings 3D Tiles from OneMap 3D on Mapbox GL JS
+Singapore buildings 3D Tiles from OneMap 3D
 ===
 
-[![Screenshot of demo site](screenshot.jpg)](https://om3d.netlify.app/)
+[![Screenshot of demo site](screenshot-1.jpg)](https://om3d.netlify.app/)
+[![Screenshot of demo site](screenshot-2.jpg)](https://om3d.netlify.app/)
 
-This is a demo of Singapore buildings 3D tiles from [OneMap 3D](https://www.onemap.gov.sg/3d) on Mapbox GL JS.
+This is a demo of Singapore buildings 3D tiles from [OneMap 3D](https://www.onemap.gov.sg/3d), rendered with [Three.js](https://threejs.org/) and [3d-tiles-renderer](https://github.com/NASA-AMMOS/3DTilesRendererJS) in an orthographic view.
 
 Development
 ---
 
-Requires Node.js 20.19+ (Vite 8).
+Requires Node.js 24+ (Vite 8).
 
 ``` bash
 # install dependencies
 npm i
 
 # Start local server on http://localhost:5931
+# (also reachable over the LAN for phone testing)
 npm run dev
 
 # Production build into ./dist
@@ -27,9 +29,8 @@ npm run serve
 Tiles
 ---
 
-This uses [Deck.gl](https://deck.gl/)'s
-[Tile3DLayer](https://deck.gl/docs/api-reference/geo-layers/tile-3d-layer) to
-render [3D Tiles](https://www.ogc.org/standards/3dtiles).
+This uses [3d-tiles-renderer](https://github.com/NASA-AMMOS/3DTilesRendererJS)
+to render [3D Tiles](https://www.ogc.org/standards/3dtiles) with Three.js.
 
 The raw files in `./tiles` (current) and `./tiles-old` (2021) and any
 intermediate `./optimized-tiles/**/*.glb` files are excluded from this
@@ -59,6 +60,13 @@ npm run build-toy-tiles
 
 Append `?tiles=<path-to-tileset.json>` to the dev URL to preview another
 tileset. The page defaults to `optimized-tiles`.
+
+Use `?shadows=1` to start with shadows enabled, and `?renderer=webgl`,
+`?renderer=webgl2`, or `?renderer=webgpu` to pick the renderer (the default is
+WebGPU with a WebGL fallback). The settings gear (top right) holds Quality
+(Low / Medium / High), tilt shift, and shadows; Quality also accepts
+`?quality=low|medium|high`. Add `?debug=1` to log the view state during camera
+moves. The basemap is OpenFreeMap vector tiles and needs no API key.
 
 The current upstream dataset has ~24,600 tiles and is roughly 130–175 GB in
 total, so prefer `--dry-run` and `--max-level=N` while experimenting.
