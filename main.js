@@ -4006,15 +4006,23 @@ function animateStep(axis, from, to, apply) {
   animationState[axis] = { frame: requestAnimationFrame(tick), target: to };
 }
 
-function rotateByStep(direction) {
+// Tweens the bearing from its current angle to an absolute value. The target is
+// a bearing (not a wrapped azimuth), so 0 is north and the tween always takes
+// the short way round because bearings live in -180..180.
+function animateBearingTo(target) {
   const start = currentBearingDeg();
-  // Rotate right lowers the bearing, hence the negated direction.
-  const target = stepTarget('bearing', start, ROTATE_BEARING_STEP_DEG, -direction);
   animateStep('bearing', start, target, (desired) => {
     // Turn by the remaining bearing error, converted back to an azimuth delta.
     const delta = desired - currentBearingDeg();
     if (delta !== 0) setCameraAzimuth(-THREE.MathUtils.degToRad(delta));
   });
+}
+
+function rotateByStep(direction) {
+  const start = currentBearingDeg();
+  // Rotate right lowers the bearing, hence the negated direction.
+  const target = stepTarget('bearing', start, ROTATE_BEARING_STEP_DEG, -direction);
+  animateBearingTo(target);
 }
 
 function tiltByStep(direction) {
@@ -4053,15 +4061,12 @@ for (const [id, direction] of [
 const northButton = document.getElementById('north');
 if (northButton) {
   northButton.addEventListener('click', () => {
-    const offset = camera.position.clone().sub(controls.target);
-    const horizontal = Math.hypot(offset.x, offset.z);
-    camera.position.set(
-      controls.target.x,
-      controls.target.y + offset.y,
-      controls.target.z - horizontal,
-    );
-    camera.lookAt(controls.target);
-    controls.update();
+    // Toggle: from any other bearing go to north (0), and when already there
+    // return to the map's default bearing. Using the in-flight tween target
+    // keeps a rapid second press from re-reading a mid-turn angle.
+    const angle = animationState.bearing?.target ?? currentBearingDeg();
+    const isNorth = Math.abs(angle) < 0.5;
+    animateBearingTo(isNorth ? DEFAULT_BEARING : 0);
   });
 }
 
