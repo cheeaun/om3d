@@ -97,12 +97,11 @@ Tiles
 This uses [3d-tiles-renderer](https://github.com/NASA-AMMOS/3DTilesRendererJS)
 to render [3D Tiles](https://www.ogc.org/standards/3dtiles) with Three.js.
 
-The raw files in `./tiles` (current) and `./tiles-old` (2021) and any
-intermediate `./optimized-tiles/**/*.glb` files are excluded from this
-repository. The optimized `.b3dm` tiles in `./optimized-tiles` are checked in;
-they are generated from the current OneMap 3D dataset with depth-8 selection,
-hole filling, and per-building simplification. The 2021 optimized snapshot is
-kept locally as the ignored `./optimized-tiles-old`.
+The raw files in `./tiles` and any intermediate `./optimized-tiles/**/*.glb`
+files are excluded from this repository. The optimized `.b3dm` tiles in
+`./optimized-tiles` are checked in; they are generated from the current OneMap
+3D dataset with depth-8 selection, hole filling, and per-building
+simplification.
 
 ``` bash
 # Download tiles from OneMap to ./tiles/*
@@ -150,4 +149,5 @@ current endpoint, stripper behavior, and the sampling behind that estimate.
 Copyright
 ---
 
-@ [SLA](https://www.sla.gov.sg/) @ [OneMap](https://www.onemap.gov.sg/legal/termsofuse.html)
+Basemap @ [OpenFreeMap](https://openfreemap.org/) @ [OpenMapTiles](https://openmaptiles.org/) @ [OpenStreetMap](https://www.openstreetmap.org/copyright)<br>
+3D tiles @ [SLA](https://www.sla.gov.sg/) @ [OneMap](https://www.onemap.gov.sg/legal/termsofuse.html)
