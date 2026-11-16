@@ -1,0 +1,708 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  color: #222;
+  background: #e9e9e9;
+  overscroll-behavior: none;
+}
+
+/* On a wide viewport the map and the 3D preview sit side by side, so a live
+   rebuild is visible while the outline is being edited. Below the breakpoint the
+   layout collapses to the map alone and the preview becomes a full-screen panel
+   until dismissed. */
+#workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  height: 100dvh;
+}
+
+#map-pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+#preview-pane {
+  position: relative;
+  display: none;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid rgba(0, 0, 0, 0.12);
+  background: #2c3136;
+}
+
+#preview-pane canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+#preview-pane canvas:active {
+  cursor: grabbing;
+}
+
+@media (min-width: 900px) {
+  #workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  #preview-pane {
+    display: flex;
+    flex-direction: column;
+  }
+
+  #preview-pane canvas {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+}
+
+/* Below the breakpoint the preview is a full-screen overlay, opened by Build preview. */
+#workspace.preview-open #preview-pane {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+#preview-header {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-start;
+}
+
+#preview-caption {
+  position: absolute;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: rgba(20, 22, 26, 0.6);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  color: #eee;
+  font-size: 10px;
+  line-height: 1.4;
+  left: 10px;
+  bottom: 10px;
+  right: 10px;
+  pointer-events: none;
+}
+
+#preview-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 24px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
+#preview-empty[hidden] {
+  display: none;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+#map canvas {
+  outline: none;
+}
+
+#titlebar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 3;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  -webkit-backdrop-filter: blur(30px) saturate(2);
+  backdrop-filter: blur(30px) saturate(2);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12), inset 0 1px 2px #fff;
+}
+
+#titlebar h1 {
+  margin: 2px 0 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+#titlebar p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #666;
+}
+
+#back-link {
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+  text-decoration: none;
+}
+
+#back-link:hover {
+  color: #111;
+}
+
+#panel-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  color: #333;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  -webkit-backdrop-filter: blur(20px) saturate(2);
+  backdrop-filter: blur(20px) saturate(2);
+}
+
+#panel-toggle svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.15s ease-in-out;
+}
+
+#panel-toggle[aria-expanded='false'] svg {
+  transform: rotate(180deg);
+}
+
+#panel[hidden] {
+  display: none;
+}
+
+#panel {
+  position: absolute;
+  top: 44px;
+  right: 12px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 268px;
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  -webkit-backdrop-filter: blur(30px) saturate(2);
+  backdrop-filter: blur(30px) saturate(2);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12), inset 0 1px 2px #fff;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+}
+
+.note {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #888;
+}
+
+#plate-options[hidden] {
+  display: none;
+}
+
+.row-between {
+  justify-content: space-between;
+}
+
+#layers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 190px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0 -4px;
+  padding: 2px 4px;
+}
+
+.layer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.1s ease-in-out;
+}
+
+.layer:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.layer input {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: #222;
+}
+
+.layer-swatch {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #ff3b30;
+  opacity: 0.85;
+}
+
+.layer-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.layer:has(input:not(:checked)) .layer-text {
+  opacity: 0.4;
+}
+
+.layer-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: #222;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-detail {
+  font-size: 9px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.unit {
+  min-width: 44px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+  text-align: right;
+}
+
+.key-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #2b2f33;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: -2px;
+}
+
+button {
+  font-family: inherit;
+  border: 0;
+  cursor: pointer;
+}
+
+.action {
+  flex: 1;
+  padding: 7px 8px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.05);
+  color: #333;
+  font-size: 11px;
+  font-weight: 600;
+  transition: background-color 0.1s ease-in-out;
+}
+
+.action:hover {
+  background: rgba(0, 0, 0, 0.09);
+}
+
+.action:active {
+  background: rgba(0, 0, 0, 0.13);
+}
+
+.primary {
+  flex: 1;
+  padding: 9px 8px;
+  border-radius: 10px;
+  background: #222;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  transition: background-color 0.1s ease-in-out, opacity 0.1s ease-in-out;
+}
+
+.primary:hover:not(:disabled) {
+  background: #000;
+}
+
+.primary:disabled {
+  background: rgba(0, 0, 0, 0.16);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid #222;
+  outline-offset: 1px;
+}
+
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.segmented button {
+  flex: 1;
+  padding: 6px 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #555;
+  font-size: 11px;
+  font-weight: 600;
+  transition: background-color 0.1s ease-in-out;
+}
+
+.segmented button[aria-checked='true'] {
+  background: #fff;
+  color: #111;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.segmented[hidden] {
+  display: none;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.05);
+  color: #333;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.toggle .checkbox {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+}
+
+.toggle .checkbox svg {
+  width: 12px;
+  height: 12px;
+  color: #222;
+  opacity: 0;
+}
+
+.toggle[aria-pressed='true'] .checkbox {
+  background: #222;
+  border-color: #222;
+}
+
+.toggle[aria-pressed='true'] .checkbox svg {
+  color: #fff;
+  opacity: 1;
+}
+
+input[type='number'] {
+  flex: 1;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.05);
+  color: #111;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+input[type='range'] {
+  flex: 1;
+  accent-color: #222;
+}
+
+#status {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: #777;
+  white-space: pre-line;
+}
+
+#status[data-tone='error'] {
+  color: #c0291f;
+}
+
+.vertex {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.vertex:active {
+  cursor: grabbing;
+}
+
+.vertex-badge {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #ff3b30;
+  color: #fff;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  cursor: grab;
+}
+
+.vertex:active .vertex-badge {
+  cursor: grabbing;
+}
+
+.vertex-remove {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
+  background: #2b2f33;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: background-color 0.1s ease-in-out, opacity 0.1s ease-in-out;
+}
+
+.vertex-remove:hover:not(:disabled) {
+  background: #c0291f;
+}
+
+.vertex-remove:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.zoom-group {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(20, 22, 26, 0.55);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+.zoom-group button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 23px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #eee;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transition: background-color 0.1s ease-in-out;
+}
+
+.zoom-group button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.zoom-group button:active {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.toggle.pill {
+  flex: 0 0 auto;
+  width: auto;
+  height: 27px;
+  padding: 0 10px;
+  font-size: 11px;
+  /* The preview pane is a dark surface, so the light-panel toggle styling would
+     be dark-on-dark and unreadable. */
+  background: rgba(20, 22, 26, 0.55);
+  color: #eee;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+.toggle.pill:hover {
+  background: rgba(30, 34, 40, 0.75);
+}
+
+.toggle.pill .checkbox {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+.toggle.pill[aria-pressed='true'] .checkbox {
+  background: #eee;
+  border-color: #eee;
+}
+
+.toggle.pill[aria-pressed='true'] .checkbox svg {
+  color: #222;
+}
+
+.toggle.pill .checkbox svg {
+  width: 10px;
+  height: 10px;
+}
+
+#schemes {
+  flex: 0 1 auto;
+  padding: 2px;
+}
+
+#schemes button {
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+/* A narrow overlay drops the scheme picker onto its own row rather than squeezing
+   every control into one unreadable line. */
+@media (max-width: 620px) {
+  #preview-header {
+    gap: 4px;
+  }
+
+  /* Row 1: the toggles, zoom and Close. Row 2: the scheme picker, full width. */
+  #schemes {
+    order: 10;
+    flex: 1 1 100%;
+    padding: 2px;
+  }
+
+  #schemes button {
+    padding: 6px 4px;
+    font-size: 10px;
+  }
+
+  #workspace.preview-open #preview-close {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+  }
+}
+
+@media (max-width: 720px) {
+  #panel {
+    top: auto;
+    bottom: 12px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: 52dvh;
+  }
+
+  #titlebar {
+    max-width: calc(100vw - 24px);
+  }
+}
+
+/* Close only makes sense when the preview is an overlay, not a pane. It is the
+   only way out of a full-screen preview, so it gets a solid, legible style rather
+   than the faint translucent panel button. */
+@media (min-width: 900px) {
+  #preview-close {
+    display: none;
+  }
+}
+
+#workspace.preview-open #preview-close {
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #222;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+#workspace:not(.preview-open) #preview-close {
+  display: none;
+}

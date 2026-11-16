@@ -45,6 +45,9 @@ Features
   the device and can be overridden in the settings panel (persisted in
   `localStorage`) or with `?quality=low|medium|high`. The panel also holds tilt
   shift, shadows, lighting, and a "Copy debug info" button.
+- **Geometry export.** A separate page at `/export/` (linked from the settings
+  panel) picks an area, previews it in 3D, and downloads it as STL, GLB, or glTF.
+  See [Export page](#export-page-export) below.
 
 ### Quality modes
 
@@ -91,9 +94,50 @@ npm run build
 npm run serve
 ```
 
-Tiles
+Export page (`/export/`)
 ---
 
+A second, standalone page dedicated to exporting building geometry, linked from
+the main page's settings panel. It shares no code with `main.js`.
+
+- **2D map with footprints and labels.** MapLibre GL JS against OpenFreeMap's
+  Positron style. Unlike the main page's basemap, it shows building footprints and
+  place/street labels, which is what makes choosing an area possible.
+- **Polygon selection.** Drag numbered handles, click near the outline to add a
+  vertex, or the `×` beside a handle to remove one. The first click on an empty
+  map creates an outline: a bounding box around the clicked building when the
+  click lands on a footprint, otherwise a 600 m square. The area is saved to
+  `localStorage` and restored on reload.
+- **Optional base plate.** A slab under the model with a configurable thickness
+  (0.6–8 mm) and margin (0–10 mm), applied in final millimetres rather than source
+  metres so it prints the same at any scale.
+- **Live 3D preview.** Above 900 px the map and preview sit side by side; below it
+  the preview is a full-screen overlay that "Build preview" opens. The preview
+  keeps its camera while you edit, and rebuilds after a 350 ms debounce. Decoded
+  tile geometry is cached per tile, so a rebuild issues no network requests.
+- **Colour schemes and zoom.** Slate and Iridescent shading plus a wireframe
+  toggle, with zoom buttons, wheel zoom, and a refit button.
+- **Drawn outline overlay.** The selected area is traced on the plate's top
+  surface as a dashed line with numbered vertex badges, toggleable.
+- **Collapsible panel.** The options panel folds away to show more of the map.
+- **Per-building exclusion.** The panel lists every building the outline picked
+  up, so a landmark can be exported without the neighbouring buildings the
+  polygon also caught. At least one building always stays selected.
+- **Formats and scale.** Binary STL, GLB, and glTF. Output either fits a chosen
+  model size (60/100/150/200 mm or custom, in millimetres) or is left at real
+  world 1:1 metres for the glTF formats.
+- **Settings persist.** Model size, plate options, format, scale mode, colour
+  scheme, wireframe, outline visibility, and the excluded buildings are stored in
+  `localStorage` under `om3d.export.settings`.
+
+The exported geometry is the same dataset the main page renders, so a model is a
+soup of per-building shells plus the optional plate, not a single manifold solid.
+The source shells are open, so slicers will union them but a printer may need
+supports. There is no terrain in this dataset, so buildings on higher ground are
+anchored by the slab rather than by ground geometry.
+
+Tiles
+---
 This uses [3d-tiles-renderer](https://github.com/NASA-AMMOS/3DTilesRendererJS)
 to render [3D Tiles](https://www.ogc.org/standards/3dtiles) with Three.js.
 

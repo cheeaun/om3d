@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="../favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Export Singapore buildings</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="workspace">
+      <section id="map-pane">
+        <div id="map"></div>
+
+        <header id="titlebar">
+          <a href="../" id="back-link">← Back to the 3D map</a>
+          <h1>Export buildings</h1>
+        </header>
+
+        <button
+          type="button"
+          id="panel-toggle"
+          aria-expanded="true"
+          aria-controls="panel"
+          title="Hide options"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M15 5 8 12l7 7"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+
+        <form id="panel" autocomplete="off">
+          <div class="group">
+            <span class="label">Area</span>
+            <div class="row">
+              <button type="button" id="undo" class="action">Undo</button>
+              <button type="button" id="clear" class="action">Clear</button>
+              <button type="button" id="reset" class="action">Rectangle</button>
+            </div>
+            <p class="note">
+              Drag the numbered handles. Click near the outline to add a vertex,
+              or the <span class="key-dot">×</span> next to a handle to remove
+              one.
+            </p>
+          </div>
+
+          <div class="group">
+            <label class="label" for="size">Model size</label>
+            <div class="segmented" role="radiogroup" aria-labelledby="size">
+              <button type="button" data-size="60">60</button>
+              <button type="button" data-size="100">100</button>
+              <button type="button" data-size="150">150</button>
+              <button type="button" data-size="200">200</button>
+            </div>
+            <div class="row">
+              <input
+                type="number"
+                id="size-custom"
+                min="10"
+                max="400"
+                step="5"
+                value="150"
+              />
+              <span class="unit">mm</span>
+            </div>
+          </div>
+
+          <div class="group">
+            <button type="button" id="plate" class="toggle" aria-pressed="true">
+              <span class="checkbox" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M5 12.5 10 17.5 19 7.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
+              <span>Base plate</span>
+            </button>
+            <div id="plate-options">
+              <label class="label" for="thickness">Thickness</label>
+              <div class="row">
+                <input
+                  type="range"
+                  id="thickness"
+                  min="0.6"
+                  max="8"
+                  step="0.2"
+                  value="2"
+                  aria-label="Base plate thickness in millimetres"
+                />
+                <output id="thickness-value" class="unit">2.0 mm</output>
+              </div>
+              <label class="label" for="margin">Margin</label>
+              <div class="row">
+                <input
+                  type="range"
+                  id="margin"
+                  min="0"
+                  max="10"
+                  step="0.5"
+                  value="0"
+                  aria-label="Base plate margin in millimetres"
+                />
+                <output id="margin-value" class="unit">0 mm</output>
+              </div>
+            </div>
+            <p class="note" id="plate-note" hidden>
+              Without a base plate the buildings are free-floating shells with
+              nothing joining them, so slicers will need supports or a raft.
+            </p>
+          </div>
+
+          <div class="group" id="layers-group" hidden>
+            <div class="row row-between">
+              <span class="label">Buildings</span>
+              <span id="layers-count" class="unit"></span>
+            </div>
+            <p class="note">
+              Everything the outline picked up. Untick to leave a building out of
+              the preview and the export.
+            </p>
+            <div id="layers-list"></div>
+          </div>
+
+          <div class="group">
+            <span class="label">Format</span>
+            <div class="segmented" role="radiogroup" aria-label="Export format">
+              <button type="button" data-format="stl">STL</button>
+              <button type="button" data-format="glb">GLB</button>
+              <button type="button" data-format="gltf">glTF</button>
+            </div>
+            <div
+              class="segmented"
+              id="scale-modes"
+              role="radiogroup"
+              aria-label="Scale mode"
+            >
+              <button type="button" data-scale="fit">Fit to size</button>
+              <button type="button" data-scale="real">Real 1:1</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <button type="button" id="build" class="action">Rebuild</button>
+            <button type="button" id="download" class="primary" disabled>
+              Download
+            </button>
+          </div>
+          <button type="button" id="cancel" class="action" hidden>Cancel</button>
+
+          <p id="status" role="status"></p>
+        </form>
+      </section>
+
+      <section id="preview-pane" aria-label="3D preview">
+        <div id="preview-header">
+          <div
+            class="segmented"
+            id="schemes"
+            role="radiogroup"
+            aria-label="Colour scheme"
+          >
+            <button type="button" data-scheme="slate">Slate</button>
+            <button type="button" data-scheme="iridescent">Iridescent</button>
+          </div>
+          <button
+            type="button"
+            id="wireframe"
+            class="toggle pill"
+            aria-pressed="false"
+          >
+            <span class="checkbox" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M5 12.5 10 17.5 19 7.5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </span>
+            <span>Wireframe</span>
+          </button>
+          <button
+            type="button"
+            id="annotations"
+            class="toggle pill"
+            aria-pressed="true"
+          >
+            <span class="checkbox" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M5 12.5 10 17.5 19 7.5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </span>
+            <span>Outline</span>
+          </button>
+          <div class="zoom-group" role="group" aria-label="Zoom">
+            <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+            <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+            <button type="button" id="refit" aria-label="Refit view">⤢</button>
+          </div>
+          <button type="button" id="preview-close" class="action">Close</button>
+        </div>
+        <canvas id="preview-canvas"></canvas>
+        <p id="preview-caption"></p>
+        <p id="preview-empty">Draw an area on the map to build a preview.</p>
+      </section>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

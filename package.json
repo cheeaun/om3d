@@ -27,6 +27,7 @@
     "@loaders.gl/draco": "^4.5.4",
     "@mapbox/vector-tile": "^2.0.5",
     "3d-tiles-renderer": "^0.5.4",
+    "maplibre-gl": "^6.18.0",
     "pbf": "^4.0.2",
     "suncalc": "^2.1.4",
     "three": "0.187.0"

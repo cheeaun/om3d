@@ -361,6 +361,31 @@ button {
   outline-offset: 1px;
 }
 
+.settings-row {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-row .settings-action {
+  flex: 1;
+}
+
+/* Export is a link, so it has to opt out of the button reset above and lay its
+   label next to the outward arrow. */
+.settings-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-decoration: none;
+}
+
+.settings-link svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
 .settings-footer {
   padding-top: 10px;
   border-top: 1px solid rgba(0, 0, 0, 0.08);

@@ -12,6 +12,8 @@ Context for coding agents working on this repository.
 - loaders.gl 4.5 (`Tiles3DLoader`, `DracoLoader`) for the tile scripts
 - OpenFreeMap vector basemap (OpenMapTiles schema) rasterized into a shared
   canvas and uploaded as `ImageBitmap` tile textures; no API key required
+- MapLibre GL JS (`maplibre-gl`) drives only the `/export/` page's 2D map, for
+  building footprints and labels; the main page does not load it
 - `gltfpack` (dev dependency) and `meshoptimizer` are used by
   `build-toy-tiles` for per-building simplification and meshopt compression
 
@@ -64,6 +66,8 @@ tiles load — which makes on-screen verification impossible.
 - `scripts/build-toy-tiles-all.mjs` — runs the builder in 500-tile child
   processes because the Draco/meshoptimizer WASM heap grows over a full run
 - `scripts/copy-tiles.mjs` — deployment payload filter
+- `export/` — second, standalone entry point (`/export/`): MapLibre map,
+  polygon editor, three.js preview, STL/GLB/glTF download. See below.
 
 ## Rendering notes
 
@@ -526,6 +530,151 @@ WASM heap grows over a full run.
   another tileset for comparison. `optimized-tiles-old/` and the raw `tiles/`
   source are gitignored.
 - `postbuild` copies `optimized-tiles` into `dist/optimized-tiles`.
+
+## Export page (`/export/`)
+
+A second, standalone entry point dedicated to exporting geometry. It shares no
+code with `main.js`; only `singapore-outline.js` and the dependencies are
+common. Do not import from `main.js` here or vice versa — `main.js` must stay
+untouched.
+
+- Files: `export/index.html`, `style.css`, `app.js` (state machine), `map.js`
+  (MapLibre + polygon editor), `tiles.js` (select/decode/clip), `geometry.js`
+  (pure maths), `formats.js` (STL/GLB/glTF), `preview.js` (three.js preview).
+- `vite.config.js` declares both inputs (`index.html`, `export/index.html`).
+  Without that, `/export/` works in `npm run dev` but is never emitted by
+  `npm run build`, so it 404s on the deployed demo.
+- The map is MapLibre GL JS against OpenFreeMap's `positron` style. That is
+  deliberate: the main page's basemap has no building footprints or labels, and
+  choosing an export area is impossible without them, so we get them from the
+  style rather than re-implementing text shaping and label collision.
+  `setWorkerUrl(workerUrl)` with Vite's `?worker&url` import is **required** —
+  a wrong worker URL only fails under `vite build`, never in dev.
+- The tileset URL is resolved against `document.baseURI`, **not**
+  `import.meta.url`. Using the module URL makes Vite copy `tileset.json` into
+  `dist/assets/` and every relative `content.uri` then points at a directory
+  with no `.b3dm` files.
+- **Tile selection must be leaf-most.** The tileset is `refine: "REPLACE"` and
+  content nodes have children that also carry content (`4/0/0_5` → `_4` → `_3`),
+  so collecting every `content.uri` emits each building 3–5×. `selectTiles()`
+  recurses first and only emits a node's own content when no descendant matched.
+- The ECEF→world frame is rebuilt from `WGS84_ELLIPSOID.getObjectFrame(...)`
+  and inverted, mirroring `ReorientationPlugin`. Per tile the world matrix is
+  `ecefToWorld × mesh.matrixWorld`; `mesh.matrixWorld` already includes the tile
+  scene's `RTC_CENTER` and Z-up rotation, so never multiply by
+  `tileScene.matrix` again. `optimized-tiles` are meshopt-compressed and
+  quantized: read with `position.getX/getY/getZ` or the dequantization is lost.
+- Polygons are stored as `{lat, lon}` and converted with the ellipsoid, not with
+  `main.js`'s Mercator `lonLatToWorld`, which drifts by metres at the island's
+  edge.
+- Clipping triangulates the ring with `ShapeUtils.triangulateShape` and clips
+  against the convex pieces, so **concave** polygons are exact. A triangle fully
+  inside the ring short-circuits and is kept whole, otherwise the triangulation's
+  interior diagonals would needlessly split it.
+- Units: world is metres. Output is millimetres in "fit to print size" mode
+  (scale derived from the XZ footprint, buildings ∪ drawn area) or raw metres in
+  the GLB/glTF "real 1:1" mode. Two distinct factors coexist and must not be
+  confused: `mmPerMetre` (print scale) and `unitPerMetre` (output units). Plate
+  thickness is authored in millimetres and converts with `mmPerMetre`, so using
+  `unitPerMetre` would make a 2 mm plate 2 m thick in 1:1 mode.
+- The base plate is optional, with a thickness (0.6–8 mm) and a margin (0–10 mm),
+  both applied in print millimetres. In GLB/glTF it is a separate `BasePlate`
+  node so it can be deleted in one click.
+- **`computeGroundY` samples one base per building, not one per triangle.** A
+  tall building is many wall triangles whose min-Y spreads up its whole height,
+  so a per-triangle histogram is dominated by whichever storeys carry the most
+  subdivisions; the mode then lands tens of metres up the side of a tower and
+  the plate visibly slices through it (measured 27 m wrong at Jurong East).
+  `buildingBasesFromBuckets` reduces each bucket to `min(triangleMins)` first.
+- The plate top stays at the **modal** building base rather than the maximum.
+  No rule can both bury every base and float none: Singapore buildings sit on
+  ground that varies by a few metres, and a handful of shells (e.g. ASIA SQUARE
+  TOWER 1, base 25 m) start well above the street. Using the maximum as the plate
+  top swallowed 86 of 99 buildings on a 2 km Marina crop. Mode buries the common
+  case and leaves a few stragglers floating, which is the visible, fixable
+  failure rather than the destructive one.
+- There is no terrain in `sg_noterrain_tiles`; a building on higher ground can
+  only be anchored by the slab, which is what the thickness control is for.
+- **The source shells are open, and `optimized-tiles` doubles every face.** The
+  upstream OneMap B3DM has no duplicate triangles but thousands of boundary
+  edges (a 8.7k-triangle tile has ~25k boundary edges), so the buildings are open
+  shells, not closed solids. Our built tiles then contain each triangle twice,
+  emitted as consecutive identical pairs, which hides some of those gaps. Do not
+  "fix" the duplication on its own: de-duplicating reveals the open shells
+  immediately. Filling them needs a real hole-filling pass, which is not done.
+- The preview draws the drawn polygon as a dashed `Line2` plus numbered sprite
+  badges, on the plate's top surface. Sprites are used because they always face
+  the camera; their canvas textures must be disposed with the material. The
+  whole annotation set toggles via `setAnnotationsVisible()`; keep those objects
+  in `annotationObjects` rather than only in `outlineObjects`.
+- `show()` must not re-aim the camera on every build. `frame()` runs only on the
+  first build or when the caller passes `{ refit: true }`, otherwise a live
+  rebuild yanks the view out from under someone orbiting. Only the clip planes
+  are refreshed.
+- Buildings are separated by the tile's `_BATCHID` attribute, which the loader
+  lowercases to `_batchid`. `extractWorldTriangles` groups triangles per batch and
+  the clip pass accumulates into one bucket per building (`<tileUri>#<batchId>`),
+  which is what powers the Buildings list. Unticking a row excludes that bucket
+  from both the preview and the export; at least one row is always kept ticked.
+- `gml:name` in the batch table is populated for only ~4% of buildings, so rows
+  are labelled `Building N` with height/usage as the detail unless a name exists.
+- Plate thickness and margin are hidden when the base plate is off.
+- Model size, plate on/off, thickness, margin, format, scale mode, colour scheme,
+  wireframe, outline visibility and the unticked building keys are persisted in
+  `localStorage` under `om3d.export.settings`. `syncPlate`/`syncSizeButtons` push
+  state back into the slider inputs, not just their labels, or a restored value
+  would not show on load. The area polygon has its own key, `om3d.export.area`.
+- The preview defaults to the `iridescent` scheme; its plate grey must stay well
+  above the near-black background or the slab reads as a hole and the buildings
+  look like they float.
+- Positron draws the `building` fill at layer 8 and every road class after it, so
+  paths painted over the footprints. `liftBuildingsAboveRoads` calls `moveLayer`
+  to lift it above the last line layer; boundary lines and our own polygon stay
+  above, which is correct.
+- A map click only inserts a vertex within `INSERT_RADIUS_PX` (28) of an existing
+  edge, measured in screen pixels at the current zoom. A click anywhere else is
+  ignored, so an accidental tap while panning cannot spawn a stray vertex.
+- The page starts with **no** outline. The first click creates one: a bounding box
+  of the clicked building footprint when the click lands on a building in the
+  MapLibre style, otherwise a fixed 600 m square centred on the click.
+  `queryRenderedFeatures` must be given `[x, y]` (or a real `Point`) — a plain
+  `{x, y}` object silently returns every rendered feature instead of filtering.
+- A click snaps to **one polygon part**, not the union of everything returned. OSM
+  building features are often MultiPolygons whose parts are separate structures
+  spread across the map (Marina Bay Sands reports 5 disconnected parts, one
+  hundreds of metres away), so taking the bbox of every ring of every hit unions
+  in far-off geometry and the same building yields different rectangles depending
+  on where you click. `polygonParts` splits the geometry, then the **largest** part
+  containing the click wins: a landmark is a pile of overlapping polygons (tower,
+  SkyPark, small decoration shapes), so picking the smallest would snap a click on
+  a decoration to that sliver instead of the building.
+- The snapped box is capped at `MAX_CLICK_BOX_M` (450 m) **including its padding**,
+  so one click can never frame half a district. The cap is applied to the final
+  size, not the footprint, or the 8% margin pushes it past the limit.
+- Clearing must also empty the preview *and* the Buildings list. Fewer than 3
+  vertices makes `buildPreview` return early, so `onPolygonChange` calls
+  `clearPreviewPane()` directly rather than relying on a build to do it.
+- `preview.js` renders on demand, so `disposeMeshes()` must set `needsRender`;
+  otherwise the canvas keeps showing the last frame after a clear.
+- Below 900 px the preview is a full-screen overlay, and **Build preview opens it**
+  (`buildPreview` calls `openPreview()` for manual builds only). Do not add a
+  separate "View 3D" trigger: building into an invisible pane and then pressing a
+  second button is one step too many. Live rebuilds never open the overlay, since
+  that would pop up while handles are being dragged. Crossing the breakpoint drops
+  the `preview-open` class, or a leftover overlay state would pin the pane
+  full-screen on a wide layout.
+- Zoom comes from three places and they must agree: OrbitControls' own wheel and
+  pinch, the `+`/`−` buttons, and a `wheel` listener on the canvas. Both call
+  `zoomBy(factor)`, which scales the camera-to-target distance so behaviour is
+  identical.
+- The layout is a CSS grid: map left, live 3D preview right above 900 px. Below
+  that the preview is a full-screen overlay toggled from the panel.
+- A rebuild is triggered by a 350 ms debounce on any outline or model option
+  change. Decoded tile geometry is cached per URI in `tileCache`, so a rebuild
+  after the first is ~100 ms and issues no network requests. `clipWorldTriangles`
+  is the cheap per-polygon half; `extractWorldTriangles` is the expensive one.
+- A `buildToken` guards against overlapping builds: an older run bails out rather
+  than painting over a newer preview.
 
 ## Deployment
 

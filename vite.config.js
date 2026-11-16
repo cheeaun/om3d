@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 export default {
   base: '',
   server: {
@@ -9,5 +11,13 @@ export default {
     host: true,
     port: 5932,
     strictPort: true,
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve('index.html'),
+        export: resolve('export/index.html'),
+      },
+    },
   },
 };
