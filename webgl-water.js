@@ -68,6 +68,9 @@ class Water extends Mesh {
 		const reflectionY = options.reflectionY;
 		const side = options.side !== undefined ? options.side : FrontSide;
 		const fog = options.fog !== undefined ? options.fog : false;
+		const waterFadeColor = new Color( options.waterFadeColor !== undefined ? options.waterFadeColor : 0xffffff );
+		const waterFadeStart = options.waterFadeStart !== undefined ? options.waterFadeStart : 1e9;
+		const waterFadeEnd = options.waterFadeEnd !== undefined ? options.waterFadeEnd : 1e9;
 
 		//
 
@@ -105,7 +108,10 @@ class Water extends Mesh {
 					'sunColor': { value: new Color( 0x7F7F7F ) },
 					'sunDirection': { value: new Vector3( 0.70707, 0.70707, 0 ) },
 					'eye': { value: new Vector3() },
-					'waterColor': { value: new Color( 0x555555 ) }
+					'waterColor': { value: new Color( 0x555555 ) },
+					'waterFadeColor': { value: new Color( 0xffffff ) },
+					'waterFadeStart': { value: 1e9 },
+					'waterFadeEnd': { value: 1e9 }
 				}
 			] ),
 
@@ -142,6 +148,9 @@ class Water extends Mesh {
 				uniform vec3 sunDirection;
 				uniform vec3 eye;
 				uniform vec3 waterColor;
+				uniform vec3 waterFadeColor;
+				uniform float waterFadeStart;
+				uniform float waterFadeEnd;
 				uniform vec2 screenSize;
 
 				varying vec4 worldPosition;
@@ -212,6 +221,12 @@ class Water extends Mesh {
 					vec3 scatter = max( 0.0, dot( surfaceNormal, eyeDirection ) ) * waterColor;
 					vec3 albedo = mix( ( sunColor * diffuseLight * 0.3 + scatter ) * getShadowMask(), reflectionSample + specularLight, reflectance );
 					vec3 outgoingLight = albedo;
+
+					// Flat-map horizon: dissolve the far ocean into the sky instead
+					// of letting the sheet run to the edge of the view.
+					float waterFade = smoothstep( waterFadeStart, waterFadeEnd, length( worldPosition.xz ) );
+					outgoingLight = mix( outgoingLight, waterFadeColor, waterFade );
+
 					gl_FragColor = vec4( outgoingLight, alpha );
 
 					#include <tonemapping_fragment>
@@ -239,6 +254,9 @@ class Water extends Mesh {
 		material.uniforms[ 'waterColor' ].value = waterColor;
 		material.uniforms[ 'sunDirection' ].value = sunDirection;
 		material.uniforms[ 'distortionScale' ].value = distortionScale;
+		material.uniforms[ 'waterFadeColor' ].value = waterFadeColor;
+		material.uniforms[ 'waterFadeStart' ].value = waterFadeStart;
+		material.uniforms[ 'waterFadeEnd' ].value = waterFadeEnd;
 
 		material.uniforms[ 'eye' ].value = eye;
 

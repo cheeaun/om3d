@@ -187,6 +187,26 @@
           </span>
           <span>Shadows</span>
         </button>
+        <button
+          id="lighting"
+          class="toggle"
+          type="button"
+          aria-pressed="false"
+        >
+          <span class="checkbox" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M5 12.5 10 17.5 19 7.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <span>Lighting</span>
+        </button>
         <p id="quality-note" class="settings-note"></p>
         <button id="copy-debug" class="settings-action" type="button">
           Copy debug info
@@ -234,7 +254,7 @@
         aria-label="Time of day"
       />
       <div class="sun-now">
-        <span class="sun-now-label">Sun</span>
+        <span id="sun-phase" class="sun-now-label">Sun</span>
         <span id="sun-time">--:--</span>
       </div>
     </section>

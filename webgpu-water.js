@@ -22,6 +22,7 @@ import {
   uniform,
   mul,
   mix,
+  smoothstep,
   screenUV,
 } from 'three/tsl';
 
@@ -42,6 +43,11 @@ class WaterMesh extends Mesh {
     this.waterColor = uniform(new Color(options.waterColor ?? 0x7f7f7f));
     this.distortionScale = uniform(options.distortionScale ?? 20.0);
     this.reflectivity = options.reflectivity ?? 0.22;
+    this.waterFadeColor = uniform(
+      new Color(options.waterFadeColor ?? 0xffffff),
+    );
+    this.waterFadeStart = options.waterFadeStart ?? 1e9;
+    this.waterFadeEnd = options.waterFadeEnd ?? 1e9;
     this.reflectionTexture = options.reflectionTexture;
 
     const getNoise = Fn(([uv]) => {
@@ -133,11 +139,21 @@ class WaterMesh extends Mesh {
         0.0,
         dot(surfaceNormal, eyeDirection),
       ).mul(this.waterColor);
-      return mix(
+      const waterColorNode = mix(
         this.sunColor.mul(diffuseLight).mul(0.3).add(scatter),
         reflectionColor.add(specularLight),
         reflectance,
       );
+
+      // Flat-map horizon: dissolve the far ocean into the sky instead of
+      // letting the sheet run to the edge of the view.
+      const fade = smoothstep(
+        this.waterFadeStart,
+        this.waterFadeEnd,
+        length(positionWorld.xz),
+      );
+
+      return mix(waterColorNode, this.waterFadeColor, fade);
     })();
   }
 }

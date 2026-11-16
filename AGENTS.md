@@ -130,10 +130,60 @@ tiles load — which makes on-screen verification impossible.
   a cool hemisphere ground puts a blue glow under the buildings. When shadows
   are on the hemisphere drops to `0.7` and its ground is tinted slightly warm
   (`0xebe8e2`) so the indirect fill does not read blue against the warm key.
-  The clay is a neutral off-white Lambert (`0xfafafa`); the basemap is
-  deliberately a slightly darker neutral grey so the massing reads against it.
-  Keep the model brighter than the base; if the model looks "cloudy", check
-  exposure and the base values before adding contrast.
+  The clay is a neutral off-white Lambert (`0xfafafa`); the basemap keeps its
+  own land-cover colours (grass/wood/sand/landuse/roads via
+  `vectorFeatureColor`), and the lighting multiplies over them so parks stay
+  green while the map absorbs the time-of-day tint. Keep the model brighter
+  than the base; if the model looks "cloudy", check exposure and the base
+  values before adding contrast.
+- Time-of-day lighting is opt-in through the `#lighting` checkbox (off by
+  default) and works with or without shadows. `LIGHTING_COLOR_STOPS` /
+  `LIGHTING_SCALAR_STOPS` key on the slider's true solar elevation, not clock
+  time, so dawn and dusk share the same warm-key/cool-sky curve; `DUSK_*` adds
+  a small rose tint on the evening side. Singapore is equatorial and humid, so
+  the warm band is short, the sky stays hazy instead of saturated, and the
+  skylight stays cool while the key is warm. `LIGHTING_BASE` holds the flat
+  values, and `applyLighting()` lerps over them with `lightingBlend`, which
+  tweens on toggle but tracks the slider directly. Without shadows only the
+  preset colours are taken: the shadowed preset's heavy key / thin fill would
+  wash out a shadowless scene, so `applyLighting()` keeps the flat intensities
+  and exposure when `shadowsEnabled` is false. At high sun the tint is white
+  and the colours match the flat day look except for the sky gradient.
+  Keep the basemap tint (`basemapTint`) and water `sunColor`/`waterColor` in
+  sync with the preset: the basemap and ground are unlit and can only be
+  tinted, and water is a shader the lights do not reach. `basemap` stops are
+  multipliers over the baked layer colours, with white at high sun (natural
+  colours) and a warm darkening at dawn/dusk; `LIGHTING_BASE_BASEMAP` is white.
+  `applyLighting()` only walks the basemap meshes that exist when the preset
+  changes, so the basemap tile loader must copy `basemapTint` into each new
+  material when its texture arrives; otherwise a level that finishes loading
+  later comes in white and the land looks unlit until the next lighting change.
+  `sky` is the horizon/fog colour and `skyTop` is the zenith colour for the sky
+  gradient. `?lighting=1` enables it at startup (works with or without
+  `?shadows=1`).
+- The sky above the map is a gradient plane (`skyPlane`), not a dome: an
+  orthographic camera has no horizon, so `updateSky()` fits a camera-facing
+  plane to the strip between the camera far plane's screen row and the top of
+  the view. Its bottom colour is the fog colour, so the horizon seam is
+  invisible; `skyTop` supplies the zenith colour and
+  `updateSkyGradientTexture()` redraws the 256x128 canvas whenever the colours or
+  the sun glow change. It is on layer 2 (main view only). The sun panel's
+  LABEL (`#sun-phase`) shows Dawn/Day/Dusk while lighting is on and goes back to
+  `Sun` when it is off.
+- The sun is not a mesh: its glow is painted into the sky gradient canvas, so it
+  is part of the background and anything drawn later covers it. That is what
+  makes it impossible for the sun to show through a building, and it is why
+  nothing is drawn when the sky band is hidden. `updateSkyGlowPosition()` maps the
+  sun's azimuth relative to `cameraForward` to the glow's X and its elevation to
+  Y, fading out past ±32° of relative azimuth (`SKY_GLOW_HALF_ANGLE`). It is
+  deliberately a broad low-contrast haze with no bright core: an orthographic
+  camera has zero parallax, so a direction cannot move on screen while panning.
+  A crisp disc then reads as a decal pinned to the glass next to sliding
+  buildings, while diffuse haze reads as light in the air. Do not "fix" the
+  pinned sun by world-anchoring it — a fixed compass bearing must not drift as
+  you pan. The glow is additive (`globalCompositeOperation = 'lighter'`) in the
+  2D canvas, so both renderers get an identical result. `skyGlowAspect` squashes
+  it by the band's own aspect so it stays round once the strip is stretched.
 - Shadows are opt-in through the `#shadows` button. Medium/high use
   `PCFShadowMap`; low uses `BasicShadowMap` (one compare instead of PCF's
   multi-tap filter) because pausing shadows only zeroes the intensity uniform,
@@ -211,9 +261,15 @@ tiles load — which makes on-screen verification impossible.
   other frame (`waterReflectionFrame`; the WebGL fork also alternates). Both are
   invisible under the blur and roughly halve the extra render cost. True SSR is
   not cheaper here: it still needs a depth/normal prepass and raymarching, and
-  cannot reflect geometry that is outside the main view. Low quality uses a flat
-  unlit `MeshBasicMaterial` in `WATER_LOW_COLOR`. The plinth was removed: it sat
-  under the mirror camera and blocked the reflection render.
+  cannot reflect geometry that is outside the main view. The plane is
+  `WATER_SIZE` (140 km) but both shaders dissolve it into `skyColor` between
+  `WATER_FADE_START` (18 km) and `WATER_FADE_END` (45 km) from the map centre:
+  this is a flat orthographic map with no globe limb, so without the fade the
+  ocean runs to the edge of the view as an infinite sheet. Keep the fade
+  uniforms in sync in `webgl-water.js` and `webgpu-water.js`; the fade colour
+  follows `skyColor` in `applyLighting()`. Low quality uses a flat unlit
+  `MeshBasicMaterial` in `WATER_LOW_COLOR` (no fade). The plinth was removed: it
+  sat under the mirror camera and blocked the reflection render.
 - The mirror view needs geometry the main camera culls: a tower of height `h`
   appears in the water up to roughly `h / tan(pitch)` further toward the camera
   than its ground footprint, so at high zoom the traversal detached those tiles
@@ -344,6 +400,8 @@ canvas allocations and one live bitmap per loaded basemap tile.
 
 - `?shadows=1` starts with shadows enabled; the `#shadows` toggle is in the
   settings panel.
+- `?lighting=1` starts with time-of-day lighting enabled; the `#lighting`
+  toggle is in the settings panel and works with or without shadows.
 - `?renderer=webgl` uses the classic `WebGLRenderer` (with `EffectComposer`).
   `?renderer=webgl2` uses the node renderer with `forceWebGL: true`, i.e. the
   WebGPU-style path on a WebGL2 backend. `?renderer=webgpu` forces the node

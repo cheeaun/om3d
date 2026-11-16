@@ -253,7 +253,7 @@ const BASEMAP_Y = -2;
 const LAND_Y = BASEMAP_Y + 0.5;
 const WATER_DEPTH = 0.1;
 const WATER_Y = LAND_Y - WATER_DEPTH;
-const WATER_SIZE = 200000;
+const WATER_SIZE = 140000;
 const OPENFREEMAP_TILEJSON = 'https://tiles.openfreemap.org/planet';
 const OPENFREEMAP_SOURCE_MAX_ZOOM = 14;
 const BG_COLOR = 0xc4c5c5;
@@ -263,6 +263,10 @@ const BG_COLOR = 0xc4c5c5;
 // a flat grey wall.
 const SKY_COLOR = 0xc6dcee;
 const FOG_COLOR = SKY_COLOR;
+// Mutable copy: the time-of-day lighting tints sky, clear colour and fog
+// together so the horizon stays seamless at dawn and dusk as well.
+const skyColor = new THREE.Color(SKY_COLOR);
+const skyTopColor = new THREE.Color(SKY_COLOR);
 
 const statusEl = document.getElementById('status');
 const northArrowEl = document.querySelector('#north .needle');
@@ -338,11 +342,11 @@ renderer.shadowMap.enabled = shadowsEnabled;
 renderer.shadowMap.type =
   qualityTier === 'low' ? THREE.BasicShadowMap : THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false;
-renderer.setClearColor(SKY_COLOR);
+renderer.setClearColor(skyColor);
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(SKY_COLOR);
+scene.background = skyColor;
 const fog = new THREE.Fog(FOG_COLOR, ORTHO_FAR, ORTHO_FAR * 2);
 scene.fog = fog;
 
@@ -1282,7 +1286,7 @@ function renderCoverage() {
   renderer.render(scene, sun.shadow.camera);
 
   renderer.setRenderTarget(prevTarget);
-  renderer.setClearColor(SKY_COLOR, 1);
+  renderer.setClearColor(skyColor, 1);
   renderer.autoClear = prevAutoClear;
   scene.overrideMaterial = prevOverride;
   scene.background = prevBackground;
@@ -1588,6 +1592,13 @@ function buildViewInfo(label) {
       mapSize: sun.shadow.mapSize.x,
       sunDirY: fmt(sunDirection.y, 4),
     },
+    lighting: {
+      enabled: lightingEnabled,
+      blend: fmt(lightingBlend, 2),
+      elevation: fmt(lightingElevationDeg, 1),
+      phase: getLightingPhase(),
+      exposure: fmt(renderer.toneMappingExposure, 2),
+    },
     tiles: getTileStats(),
     build: {
       quality: qualityTier,
@@ -1635,6 +1646,10 @@ controls.addEventListener('change', () => {
     logViewState('move');
   }
 });
+
+// The basemap and its ground fallback are unlit, so the time-of-day lighting
+// can only tint them: the material colour multiplies the baked vector tile.
+const basemapTint = new THREE.Color(0xffffff);
 
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(12000, 12000),
@@ -1816,6 +1831,12 @@ const WATER_SUN_COLOR = 0xfff3e2;
 const WATER_COLOR = 0x6d838c;
 const WATER_LOW_COLOR = 0x9aaeb8;
 const WATER_REFLECTIVITY = 0.35;
+// A flat map has no globe limb, so the 140 km water sheet would run to the
+// edge of the view as an infinite ocean. Dissolve it into the sky between these
+// radii (world units are metres) so the sea reads as Singapore's visible cap and
+// disappears into haze further out.
+const WATER_FADE_START = 18000;
+const WATER_FADE_END = 45000;
 // World units are metres. The reflection is rendered from a camera mirrored
 // about the water plane, so it needs geometry the main camera has already
 // culled: a building of height h shows up in the water up to roughly
@@ -1928,9 +1949,8 @@ function updateWaterLighting() {
   const sunDirectionUniform =
     water.sunDirection ?? water.material?.uniforms?.sunDirection;
   if (!sunDirectionUniform) return;
-  sunDirectionUniform.value = shadowsEnabled
-    ? sunDirection
-    : DEFAULT_SUN_DIRECTION;
+  sunDirectionUniform.value =
+    shadowsEnabled || lightingEnabled ? sunDirection : DEFAULT_SUN_DIRECTION;
 }
 
 function createWater() {
@@ -1949,6 +1969,9 @@ function createWater() {
       size: 1,
       reflectionTexture: gpuWaterReflection.target.texture,
       reflectivity: WATER_REFLECTIVITY,
+      waterFadeColor: skyColor,
+      waterFadeStart: WATER_FADE_START,
+      waterFadeEnd: WATER_FADE_END,
     });
   } else if (qualityConfig.waterReflection && !isWebGPU) {
     const scale = qualityConfig.waterReflectionScale;
@@ -1966,6 +1989,9 @@ function createWater() {
       distortionScale: 5,
       reflectivity: WATER_REFLECTIVITY,
       fog: true,
+      waterFadeColor: skyColor,
+      waterFadeStart: WATER_FADE_START,
+      waterFadeEnd: WATER_FADE_END,
     });
   } else {
     mesh = new THREE.Mesh(
@@ -1982,6 +2008,7 @@ function createWater() {
   water = mesh;
   scene.add(mesh);
   updateWaterLighting();
+  applyLighting();
 }
 
 const basemapMeshes = new Map();
@@ -2216,6 +2243,28 @@ const VECTOR_BACKGROUND = '#c8c9c9';
 const VECTOR_LANDUSE = '#bcbdbc';
 const VECTOR_LANDCOVER = '#b8bfbc';
 const VECTOR_ROAD = '#8e8f8f';
+const VECTOR_PARK = '#b4c8a0';
+const VECTOR_WOOD = '#a8bc96';
+const VECTOR_GRASS = '#b8c9a5';
+const VECTOR_FARMLAND = '#c9c9a6';
+const VECTOR_SAND = '#d9d0ba';
+const VECTOR_WETLAND = '#aec2b8';
+const VECTOR_ROCK = '#c4bfb2';
+const VECTOR_COMMERCIAL = '#c6c1ba';
+const VECTOR_LANDUSE_GREEN = new Set([
+  'park',
+  'national_park',
+  'nature_reserve',
+  'recreation_ground',
+  'garden',
+  'playground',
+  'cemetery',
+  'grass',
+  'meadow',
+  'pitch',
+  'stadium',
+  'zoo',
+]);
 const VECTOR_LAYER_ORDER = [
   'landuse',
   'landcover',
@@ -2257,6 +2306,44 @@ const VECTOR_EXCLUDED_CLASSES = new Set([
 function vectorRoadWidthMetres(properties) {
   const roadClass = properties.class;
   return VECTOR_ROAD_WIDTHS[roadClass] ?? 5;
+}
+
+// The basemap keeps its own land-cover colours (grass, woodland, sand, …); the
+// time-of-day tint is multiplied over them by the tile material, so they absorb
+// the lighting instead of being replaced by a flat grey.
+function vectorFeatureColor(layerName, properties) {
+  if (layerName === 'landcover') {
+    switch (properties.class) {
+      case 'wood':
+        return VECTOR_WOOD;
+      case 'grass':
+        return VECTOR_GRASS;
+      case 'farmland':
+        return VECTOR_FARMLAND;
+      case 'sand':
+        return VECTOR_SAND;
+      case 'wetland':
+        return VECTOR_WETLAND;
+      case 'rock':
+        return VECTOR_ROCK;
+      default:
+        return VECTOR_LANDCOVER;
+    }
+  }
+  if (layerName === 'park') return VECTOR_PARK;
+  if (layerName === 'landuse') {
+    const landuseClass = properties.class;
+    if (VECTOR_LANDUSE_GREEN.has(landuseClass)) return VECTOR_PARK;
+    if (
+      landuseClass === 'commercial' ||
+      landuseClass === 'industrial' ||
+      landuseClass === 'retail'
+    ) {
+      return VECTOR_COMMERCIAL;
+    }
+    return VECTOR_LANDUSE;
+  }
+  return VECTOR_ROAD;
 }
 
 function isVectorRoadDrawn(properties) {
@@ -2401,15 +2488,6 @@ function renderVectorTile(
     if (erase) {
       context.fillStyle = '#000000';
       context.strokeStyle = '#000000';
-    } else if (layerName === 'landcover' || layerName === 'park') {
-      context.fillStyle = VECTOR_LANDCOVER;
-      context.strokeStyle = VECTOR_LANDCOVER;
-    } else if (layerName === 'landuse') {
-      context.fillStyle = VECTOR_LANDUSE;
-      context.strokeStyle = VECTOR_LANDUSE;
-    } else {
-      context.fillStyle = VECTOR_ROAD;
-      context.strokeStyle = VECTOR_ROAD;
     }
 
     for (const feature of features) {
@@ -2420,6 +2498,12 @@ function renderVectorTile(
         feature.minY > clipMaxY
       ) {
         continue;
+      }
+
+      if (!erase) {
+        const color = vectorFeatureColor(layerName, feature.properties);
+        context.fillStyle = color;
+        context.strokeStyle = color;
       }
 
       if (layerName === 'transportation') {
@@ -2751,7 +2835,7 @@ function updateBasemap() {
       if (basemapMeshes.has(key)) continue;
 
       const material = new THREE.MeshBasicMaterial({
-        color: BG_COLOR,
+        color: basemapTint,
         toneMapped: false,
         // Water and the world outside Singapore are transparent in the tile
         // texture; discard those fragments so the reflective water shows.
@@ -2822,7 +2906,10 @@ function pumpBasemapQueue() {
           return;
         }
         task.material.map = texture;
-        task.material.color.set(0xffffff);
+        // Keep the current time-of-day tint. applyLighting() only walks the
+        // meshes that exist when the preset changes; a level that loads later
+        // must pick up the tint here or the land comes in white/unlit.
+        task.material.color.copy(basemapTint);
         task.material.needsUpdate = true;
         task.mesh.visible = true;
       })
@@ -2896,6 +2983,475 @@ function setSunDate(date) {
 let sunriseMs = null;
 let sunsetMs = null;
 
+// --- Time-of-day lighting -------------------------------------------------
+// The sun slider already moves the real SunCalc direction. These presets turn
+// that direction into Mapbox-style dawn/day/dusk lighting. Singapore sits on
+// the equator, so the sun climbs and drops fast and the air is humid: the warm
+// hours are short, the sky stays hazy rather than saturated, and dusk carries
+// a little more rose than dawn. The curve is keyed on solar elevation, not
+// clock time, which keeps both ends symmetric.
+const LIGHTING_STOP_ELEVATIONS = [0, 5, 12, 24, 45];
+// Above this elevation the look is plain daylight. The sun panel labels
+// anything lower as Dawn or Dusk.
+const LIGHTING_DAY_ELEVATION = 18;
+
+const LIGHTING_COLOR_STOPS = {
+  sun: [0xffab6a, 0xffb97b, 0xffd1a2, 0xffe9d0, 0xfffdfa],
+  // The key is warm but the skylight is not: away from the sun the dome is
+  // blue, which is what keeps shaded faces from turning uniformly peach.
+  hemiSky: [0xc9d3e4, 0xd3dbe8, 0xe4e9f0, 0xf6f7f9, 0xffffff],
+  hemiGround: [0xd8c9bd, 0xe0d5cb, 0xe7e1da, 0xebe8e3, 0xebe8e2],
+  fill: [0xd9e3ee, 0xdfe7f0, 0xebeff3, 0xf8f9fb, 0xfffdfb],
+  ambient: [0xffe4cd, 0xffe9d6, 0xfff0e2, 0xfff9f1, 0xfffdf8],
+  // Horizon/haze colour. The low-sun stops are warmer and more golden so the
+  // sky gradient above the water reads like a Singapore sunset, not a flat
+  // grey-blue panel.
+  sky: [0xe6c3a1, 0xe0cebe, 0xd2d4d4, 0xc8dae9, 0xc6dcee],
+  // Zenith colour; the gradient runs from `sky` at the horizon to this at the
+  // top of the visible sky band.
+  skyTop: [0xc09aa0, 0xb7a6b0, 0xa8b6ca, 0xa2c0e0, 0x9dc1e8],
+  basemap: [0xcbb39a, 0xd2c6b9, 0xe0dbd5, 0xf4f3f1, 0xffffff],
+  waterSun: [0xffbd86, 0xffc99a, 0xffdcb6, 0xffeeda, 0xfff3e2],
+  waterBody: [0x636d73, 0x66737b, 0x6a7a83, 0x6c818a, 0x6d838c],
+  waterLow: [0x8a9195, 0x8e989e, 0x949fa5, 0x98a8b0, 0x9aaeb8],
+};
+
+const LIGHTING_SCALAR_STOPS = {
+  sunIntensity: [2.6, 3.0, 3.7, 4.3, 4.7],
+  hemiIntensity: [0.7, 0.78, 0.9, 0.76, 0.7],
+  fillIntensity: [0.15, 0.18, 0.23, 0.16, 0.14],
+  ambientIntensity: [0.08, 0.09, 0.07, 0.05, 0.04],
+  exposure: [1.32, 1.3, 1.27, 1.24, 1.22],
+};
+
+const LIGHTING_DUSK_SUN = new THREE.Color(0xffa568);
+const LIGHTING_DUSK_SKY = new THREE.Color(0xdcb6a8);
+const LIGHTING_DUSK_SKY_TOP = new THREE.Color(0xcf9c97);
+const LIGHTING_DUSK_BASEMAP = new THREE.Color(0xc6a99b);
+
+const LIGHTING_BASE_EXPOSURE = 1.22;
+const LIGHTING_BASE_SKY = new THREE.Color(SKY_COLOR);
+const LIGHTING_BASE_SKY_TOP = new THREE.Color(SKY_COLOR);
+const LIGHTING_BASE_BASEMAP = new THREE.Color(0xffffff);
+const LIGHTING_BASE_WATER_SUN = new THREE.Color(WATER_SUN_COLOR);
+const LIGHTING_BASE_WATER_BODY = new THREE.Color(WATER_COLOR);
+const LIGHTING_BASE_WATER_LOW = new THREE.Color(WATER_LOW_COLOR);
+
+// Values used when lighting is off. `shadowed` is what setShadows() used to
+// hard-code; `flat` is the no-shadow look. applyLighting() writes these back,
+// so the flat look is untouched by this feature.
+const LIGHTING_BASE = {
+  shadowed: {
+    sunColor: new THREE.Color(0xfffdfa),
+    sunIntensity: 4.7,
+    hemiSky: new THREE.Color(0xffffff),
+    hemiGround: new THREE.Color(SHADOW_HEMI_GROUND),
+    hemiIntensity: SHADOW_HEMI_INTENSITY,
+    fillColor: new THREE.Color(0xfffdfb),
+    fillIntensity: 0.14,
+    ambientColor: new THREE.Color(0xfffdf8),
+    ambientIntensity: 0.04,
+  },
+  flat: {
+    sunColor: new THREE.Color(0xfffdfa),
+    sunIntensity: 1.2,
+    hemiSky: new THREE.Color(0xffffff),
+    hemiGround: new THREE.Color(HEMI_GROUND),
+    hemiIntensity: 1.15,
+    fillColor: new THREE.Color(0xfffdfb),
+    fillIntensity: 0.4,
+    ambientColor: new THREE.Color(0xfffdf8),
+    ambientIntensity: 0.4,
+  },
+};
+
+const lightingColorStops = {};
+for (const key of Object.keys(LIGHTING_COLOR_STOPS)) {
+  lightingColorStops[key] = LIGHTING_COLOR_STOPS[key].map(
+    (hex) => new THREE.Color(hex),
+  );
+}
+const LIGHTING_COLOR_KEYS = Object.keys(lightingColorStops);
+const LIGHTING_SCALAR_KEYS = Object.keys(LIGHTING_SCALAR_STOPS);
+const lightingSample = {};
+for (const key of LIGHTING_COLOR_KEYS) {
+  lightingSample[key] = new THREE.Color();
+}
+
+function sampleLighting(elevationDeg, evening) {
+  const stops = LIGHTING_STOP_ELEVATIONS;
+  const elevation = THREE.MathUtils.clamp(
+    elevationDeg,
+    stops[0],
+    stops[stops.length - 1],
+  );
+  let index = 0;
+  while (index < stops.length - 2 && elevation >= stops[index + 1]) index++;
+  const t = THREE.MathUtils.smoothstep(
+    elevation,
+    stops[index],
+    stops[index + 1],
+  );
+
+  for (const key of LIGHTING_COLOR_KEYS) {
+    const colors = lightingColorStops[key];
+    lightingSample[key].copy(colors[index]).lerp(colors[index + 1], t);
+  }
+  for (const key of LIGHTING_SCALAR_KEYS) {
+    const values = LIGHTING_SCALAR_STOPS[key];
+    lightingSample[key] = THREE.MathUtils.lerp(
+      values[index],
+      values[index + 1],
+      t,
+    );
+  }
+
+  if (evening) {
+    const low = 1 - THREE.MathUtils.smoothstep(elevation, 4, 26);
+    lightingSample.sun.lerp(LIGHTING_DUSK_SUN, low * 0.45);
+    lightingSample.sky.lerp(LIGHTING_DUSK_SKY, low * 0.5);
+    lightingSample.skyTop.lerp(LIGHTING_DUSK_SKY_TOP, low * 0.45);
+    lightingSample.basemap.lerp(LIGHTING_DUSK_BASEMAP, low * 0.35);
+  }
+
+  return lightingSample;
+}
+
+const sunPhaseEl = document.getElementById('sun-phase');
+const lightingButton = document.getElementById('lighting');
+
+let lightingEnabled = params.get('lighting') === '1';
+let lightingElevationDeg = 60;
+let lightingEvening = false;
+// Blend fades the preset over the flat baseline so toggling the checkbox eases
+// instead of snapping. Slider moves update the preset continuously and do not
+// need the blend tween.
+let lightingBlend = lightingEnabled ? 1 : 0;
+let lightingBlendFrame = null;
+const LIGHTING_FADE_MS = 450;
+
+function getLightingPhase() {
+  if (!lightingEnabled) return 'Sun';
+  if (lightingElevationDeg >= LIGHTING_DAY_ELEVATION) return 'Day';
+  return lightingEvening ? 'Dusk' : 'Dawn';
+}
+
+function updateLightingUI() {
+  if (sunPhaseEl) sunPhaseEl.textContent = getLightingPhase();
+  // The colours work without shadows, and the time slider is the way to change
+  // them, so both the lighting button and the sun panel follow lighting too.
+  if (sunControls) {
+    sunControls.hidden = !(shadowsEnabled || lightingEnabled);
+  }
+  if (!lightingButton) return;
+  lightingButton.setAttribute('aria-pressed', String(lightingEnabled));
+  lightingButton.title = lightingEnabled ? 'Lighting on' : 'Lighting off';
+}
+
+function applyLighting() {
+  const base = shadowsEnabled ? LIGHTING_BASE.shadowed : LIGHTING_BASE.flat;
+  const blend = lightingBlend;
+  const preset = sampleLighting(lightingElevationDeg, lightingEvening);
+  // Without shadows the preset's heavy key / thin fill would wash out, so only
+  // its colours are absorbed: keep the flatter no-shadow intensities.
+  const intensity = (baseValue, presetValue) =>
+    THREE.MathUtils.lerp(
+      baseValue,
+      shadowsEnabled ? presetValue : baseValue,
+      blend,
+    );
+
+  sun.color.copy(base.sunColor).lerp(preset.sun, blend);
+  sun.intensity = intensity(base.sunIntensity, preset.sunIntensity);
+  hemi.color.copy(base.hemiSky).lerp(preset.hemiSky, blend);
+  hemi.groundColor.copy(base.hemiGround).lerp(preset.hemiGround, blend);
+  hemi.intensity = intensity(base.hemiIntensity, preset.hemiIntensity);
+  fill.color.copy(base.fillColor).lerp(preset.fill, blend);
+  fill.intensity = intensity(base.fillIntensity, preset.fillIntensity);
+  ambient.color.copy(base.ambientColor).lerp(preset.ambient, blend);
+  ambient.intensity = intensity(base.ambientIntensity, preset.ambientIntensity);
+
+  renderer.toneMappingExposure = THREE.MathUtils.lerp(
+    LIGHTING_BASE_EXPOSURE,
+    shadowsEnabled ? preset.exposure : LIGHTING_BASE_EXPOSURE,
+    blend,
+  );
+
+  skyColor.copy(LIGHTING_BASE_SKY).lerp(preset.sky, blend);
+  skyTopColor.copy(LIGHTING_BASE_SKY_TOP).lerp(preset.skyTop, blend);
+  // The glow is the sun's own colour, and it only belongs in the sky while the
+  // sun is low enough to sit inside the visible band; a midday sun is far above
+  // it, so the glow fades out rather than pinning to the top edge.
+  skyGlowColor.copy(preset.sun);
+  skyGlowStrength =
+    blend *
+    (1 -
+      THREE.MathUtils.smoothstep(lightingElevationDeg, 14, 32));
+  updateSkyGlowPosition();
+  scene.background.copy(skyColor);
+  renderer.setClearColor(skyColor, 1);
+  fog.color.copy(skyColor);
+
+  basemapTint.copy(LIGHTING_BASE_BASEMAP).lerp(preset.basemap, blend);
+  for (const mesh of basemapMeshes.values()) {
+    mesh.material.color.copy(basemapTint);
+  }
+  ground.material.color.copy(BG_COLOR).multiply(basemapTint);
+
+  if (water) {
+    const waterSun = water.sunColor ?? water.material?.uniforms?.sunColor;
+    if (waterSun?.value) {
+      waterSun.value.copy(LIGHTING_BASE_WATER_SUN).lerp(preset.waterSun, blend);
+    }
+    const waterBody = water.waterColor ?? water.material?.uniforms?.waterColor;
+    if (waterBody?.value) {
+      waterBody.value
+        .copy(LIGHTING_BASE_WATER_BODY)
+        .lerp(preset.waterBody, blend);
+    }
+    if (water.material?.isMeshBasicMaterial) {
+      water.material.color
+        .copy(LIGHTING_BASE_WATER_LOW)
+        .lerp(preset.waterLow, blend);
+    }
+    const waterFade =
+      water.waterFadeColor ?? water.material?.uniforms?.waterFadeColor;
+    if (waterFade?.value) waterFade.value.copy(skyColor);
+  }
+}
+
+function updateLightingBlend({ immediate = false } = {}) {
+  const target = lightingEnabled ? 1 : 0;
+  if (lightingBlendFrame !== null) {
+    cancelAnimationFrame(lightingBlendFrame);
+    lightingBlendFrame = null;
+  }
+  if (immediate || target === lightingBlend) {
+    lightingBlend = target;
+    applyLighting();
+    return;
+  }
+
+  const from = lightingBlend;
+  const startedAt = performance.now();
+  const tick = (now) => {
+    const t = Math.min((now - startedAt) / LIGHTING_FADE_MS, 1);
+    const eased = t * t * (3 - 2 * t);
+    lightingBlend = from + (target - from) * eased;
+    applyLighting();
+    lightingBlendFrame = t < 1 ? requestAnimationFrame(tick) : null;
+  };
+  lightingBlendFrame = requestAnimationFrame(tick);
+}
+
+function setLighting(enabled) {
+  lightingEnabled = enabled;
+  updateLightingUI();
+  updateLightingBlend();
+}
+
+// --- Sky gradient ---------------------------------------------------------
+// The camera is orthographic, so there is no real horizon: the strip of sky is
+// only where the camera far plane has culled the ground. Fit a camera-facing
+// plane to that strip so the background can have a vertical gradient; its bottom
+// colour is the fog colour, so the horizon seam is invisible.
+const SKY_GRADIENT_LAYER = 2;
+
+const SKY_GRADIENT_WIDTH = 256;
+const SKY_GRADIENT_HEIGHT = 128;
+const skyGradientCanvas = document.createElement('canvas');
+skyGradientCanvas.width = SKY_GRADIENT_WIDTH;
+skyGradientCanvas.height = SKY_GRADIENT_HEIGHT;
+const skyGradientContext = skyGradientCanvas.getContext('2d');
+const skyGradientTexture = new THREE.CanvasTexture(skyGradientCanvas);
+skyGradientTexture.colorSpace = THREE.SRGBColorSpace;
+skyGradientTexture.minFilter = THREE.LinearFilter;
+skyGradientTexture.magFilter = THREE.LinearFilter;
+skyGradientTexture.generateMipmaps = false;
+
+// The sun is not a mesh: its glow is painted into the same texture as the sky
+// gradient, so it is part of the background and geometry drawn afterwards always
+// covers it. That is why it cannot show through a building, and it also means
+// nothing is drawn at all when the sky band is hidden (no sky = no glow).
+const skyGlowColor = new THREE.Color(0xffd9b0);
+let skyGlowStrength = 0; // 0..1, from the lighting preset
+let skyGlowX = SKY_GRADIENT_WIDTH * 0.5;
+let skyGlowY = SKY_GRADIENT_HEIGHT * 0.82;
+let skyGlowAspect = 0.3; // rx / ry, keeps the glow round once the strip is stretched
+let skyGlowSideFade = 1; // fades out as the sun leaves the view
+
+const SKY_GLOW_HALF_ANGLE = THREE.MathUtils.degToRad(52);
+const SKY_GLOW_FADE_START = THREE.MathUtils.degToRad(32);
+// Solar elevation at which the glow reaches the top of the sky band.
+const SKY_GLOW_MAX_ELEVATION = 34;
+
+const skyGlowSignature = { value: '' };
+
+function updateSkyGlowPosition() {
+  // An orthographic camera has no vanishing point, so a direction cannot be
+  // projected to a pixel directly. Instead treat the sky band as a backdrop:
+  // the sun's azimuth relative to the view slides the glow horizontally, and its
+  // elevation raises it, so a low dawn/dusk sun sits on the horizon and a high
+  // midday sun climbs to (and past) the top of the band.
+  cameraForward
+    .setFromMatrixColumn(camera.matrixWorld, 2)
+    .negate();
+  const sunLength = Math.hypot(sunDirection.x, sunDirection.z);
+  const cameraLength = Math.hypot(cameraForward.x, cameraForward.z) || 1;
+  let relativeAzimuth = 0;
+  if (sunLength > 1e-4) {
+    const sx = sunDirection.x / sunLength;
+    const sz = sunDirection.z / sunLength;
+    const cx = cameraForward.x / cameraLength;
+    const cz = cameraForward.z / cameraLength;
+    relativeAzimuth = Math.atan2(cx * sz - cz * sx, cx * sx + cz * sz);
+  }
+
+  skyGlowX =
+    SKY_GRADIENT_WIDTH *
+    (0.5 +
+      0.5 *
+        THREE.MathUtils.clamp(relativeAzimuth / SKY_GLOW_HALF_ANGLE, -1, 1));
+  const elevation = THREE.MathUtils.clamp(lightingElevationDeg, 0, 90);
+  skyGlowY =
+    SKY_GRADIENT_HEIGHT *
+    (1 -
+      THREE.MathUtils.clamp(elevation / SKY_GLOW_MAX_ELEVATION, 0, 1));
+  // Fade the glow out as the sun rotates behind the camera, and keep the last
+  // little bit at the edge soft rather than clipping it to a hard arc.
+  skyGlowSideFade =
+    1 -
+    THREE.MathUtils.smoothstep(
+      Math.abs(relativeAzimuth),
+      SKY_GLOW_FADE_START,
+      SKY_GLOW_HALF_ANGLE,
+    );
+
+  // The band is wide and short, so the texture is stretched. Squash the glow
+  // horizontally by the same ratio to keep it round on screen.
+  const signature = `${skyGlowX.toFixed(1)}|${skyGlowY.toFixed(1)}|${skyGlowAspect.toFixed(3)}|${skyGlowSideFade.toFixed(3)}|${skyGlowStrength.toFixed(3)}|${skyGlowColor.getHexString()}`;
+  if (signature === skyGlowSignature.value) return;
+  skyGlowSignature.value = signature;
+  updateSkyGradientTexture();
+}
+
+function updateSkyGradientTexture() {
+  const ctx = skyGradientContext;
+  const width = SKY_GRADIENT_WIDTH;
+  const height = SKY_GRADIENT_HEIGHT;
+
+  const gradient = ctx.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, `#${skyTopColor.getHexString()}`);
+  gradient.addColorStop(1, `#${skyColor.getHexString()}`);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  const alpha = skyGlowStrength * skyGlowSideFade;
+  if (alpha > 0.004) {
+    const hex = skyGlowColor.getHexString();
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    ctx.save();
+    ctx.translate(skyGlowX, skyGlowY);
+    ctx.scale(skyGlowAspect, 1);
+    // Purely diffuse: an orthographic view has no parallax, so a crisp disc
+    // reads as a decal pinned to the glass. A broad, low-contrast haze reads as
+    // light in the air instead, which is what survives panning.
+    ctx.globalCompositeOperation = 'lighter';
+    const halo = height * 3.2;
+    const haloGradient = ctx.createRadialGradient(0, 0, 0, 0, 0, halo);
+    haloGradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${0.3 * alpha})`);
+    haloGradient.addColorStop(0.14, `rgba(${r}, ${g}, ${b}, ${0.21 * alpha})`);
+    haloGradient.addColorStop(0.32, `rgba(${r}, ${g}, ${b}, ${0.12 * alpha})`);
+    haloGradient.addColorStop(0.58, `rgba(${r}, ${g}, ${b}, ${0.05 * alpha})`);
+    haloGradient.addColorStop(0.8, `rgba(${r}, ${g}, ${b}, ${0.017 * alpha})`);
+    haloGradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+    ctx.fillStyle = haloGradient;
+    ctx.fillRect(-halo, -halo, halo * 2, halo * 2);
+    ctx.restore();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  skyGradientTexture.needsUpdate = true;
+}
+updateSkyGradientTexture();
+
+let MeshBasicNodeMaterialClass = null;
+if (isWebGPU) {
+  ({ MeshBasicNodeMaterial: MeshBasicNodeMaterialClass } = await import(
+    'three/webgpu'
+  ));
+}
+const skyPlaneMaterial = isWebGPU
+  ? new MeshBasicNodeMaterialClass({
+      map: skyGradientTexture,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+      fog: false,
+      side: THREE.DoubleSide,
+    })
+  : new THREE.MeshBasicMaterial({
+      map: skyGradientTexture,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+      fog: false,
+      side: THREE.DoubleSide,
+    });
+const skyPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  skyPlaneMaterial,
+);
+skyPlane.renderOrder = -10000;
+skyPlane.frustumCulled = false;
+skyPlane.layers.set(SKY_GRADIENT_LAYER);
+skyPlane.visible = false;
+scene.add(skyPlane);
+camera.layers.enable(SKY_GRADIENT_LAYER);
+
+const skyUp = new THREE.Vector3();
+const skyForward = new THREE.Vector3();
+const cameraForward = new THREE.Vector3();
+
+function updateSky() {
+  skyUp.setFromMatrixColumn(camera.matrixWorld, 1);
+  skyForward.setFromMatrixColumn(camera.matrixWorld, 2).negate();
+
+  const halfHeight = VIEW_SIZE / (2 * camera.zoom);
+  const halfWidth = halfHeight * (window.innerWidth / window.innerHeight);
+  const cameraElevation =
+    90 - THREE.MathUtils.radToDeg(controls.getPolarAngle());
+  const pitchRad = THREE.MathUtils.degToRad(
+    Math.max(cameraElevation, 1),
+  );
+  const viewDistance = camera.position.distanceTo(controls.target);
+  const skyBottom = Math.min(
+    (camera.far - viewDistance) * Math.tan(pitchRad),
+    halfHeight,
+  );
+  const skyBand = halfHeight - skyBottom;
+  if (skyBand <= 0.005 * halfHeight) {
+    skyPlane.visible = false;
+    return;
+  }
+
+  skyPlane.position
+    .copy(camera.position)
+    .addScaledVector(skyUp, skyBottom + skyBand / 2)
+    .addScaledVector(skyForward, 10);
+  skyPlane.quaternion.copy(camera.quaternion);
+  skyPlane.scale.set(halfWidth * 2 * 1.1, skyBand * 1.08, 1);
+  skyPlane.visible = true;
+
+  // The band is stretched to the viewport aspect, so the painted glow has to be
+  // squashed by the same ratio or it would read as a wide oval. Both sides are
+  // in world units here, which is why the texture dimensions cancel out.
+  skyGlowAspect = (skyBand * 1.08) / (halfWidth * 1.1);
+}
+
 function updateSunFromSlider() {
   if (!sunSlider || sunriseMs === null || sunsetMs === null) return;
 
@@ -2921,9 +3477,26 @@ function updateSunFromSlider() {
     )
     .normalize();
 
+  // Without shadows the sun camera does not run, but the directional light
+  // should still follow the slider so the colour is not applied from a stale
+  // fixed direction.
+  if (!shadowsEnabled) {
+    sun.position.copy(sunDirection).multiplyScalar(6000);
+    sun.target.position.set(0, 0, 0);
+    sun.target.updateMatrixWorld();
+  }
+
+  // Lighting follows the true solar altitude, not the 4-degree direction floor:
+  // at the sunrise and sunset ends of the slider the sun is on the horizon and
+  // the light should read as full golden hour.
+  lightingElevationDeg = Math.max(0, solar.altitude);
+  lightingEvening = fraction > 0.5;
+
   const label = formatSunTime(date);
   if (sunTimeEl) sunTimeEl.textContent = label;
   sunSlider.setAttribute('aria-valuetext', label);
+  applyLighting();
+  updateLightingUI();
   updateWaterLighting();
   if (shadowsEnabled) shadowDirty = true;
 }
@@ -3002,7 +3575,8 @@ function setShadows(enabled) {
   renderer.shadowMap.enabled = enabled;
   sun.castShadow = enabled;
   if (!enabled) {
-    sun.position.copy(DEFAULT_SUN_DIRECTION).multiplyScalar(6000);
+    const direction = lightingEnabled ? sunDirection : DEFAULT_SUN_DIRECTION;
+    sun.position.copy(direction).multiplyScalar(6000);
     sun.target.position.set(0, 0, 0);
     sun.target.updateMatrixWorld();
     lastShadowFocusX = Infinity;
@@ -3012,12 +3586,12 @@ function setShadows(enabled) {
     lastShadowDirZ = Infinity;
   }
   if (shadowGround) shadowGround.visible = enabled && !isShadowPaused();
-  if (sunControls) sunControls.hidden = !enabled;
-  ambient.intensity = enabled ? 0.04 : 0.4;
-  hemi.intensity = enabled ? SHADOW_HEMI_INTENSITY : 1.15;
-  hemi.groundColor.setHex(enabled ? SHADOW_HEMI_GROUND : HEMI_GROUND);
-  sun.intensity = enabled ? 4.7 : 1.2;
-  fill.intensity = enabled ? 0.14 : 0.4;
+  // Light colours and intensities live in applyLighting() so the time-of-day
+  // preset can fade over them; with lighting off it writes the flat baselines.
+  // Lighting now also works without shadows, so it no longer follows the sun
+  // panel's visibility.
+  updateLightingUI();
+  updateLightingBlend();
   if (tiles) {
     // Keeping every off-camera active tile in the scene is a big draw-call
     // multiplier for the shadow camera; skip it on low.
@@ -3225,6 +3799,12 @@ const shadowsButton = document.getElementById('shadows');
 if (shadowsButton) {
   shadowsButton.addEventListener('click', () => {
     setShadows(!shadowsEnabled);
+  });
+}
+
+if (lightingButton) {
+  lightingButton.addEventListener('click', () => {
+    setLighting(!lightingEnabled);
   });
 }
 
@@ -3775,6 +4355,8 @@ function animate() {
   updateShadowCamera();
   updateFog();
   camera.updateMatrixWorld();
+  updateSky();
+  updateSkyGlowPosition();
   // AO is a screen-space effect: it only changes when the view changes. This
   // also covers the intro animation and the reset buttons, which do not emit
   // controls change events.

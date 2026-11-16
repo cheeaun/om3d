@@ -176,6 +176,10 @@ button {
   box-sizing: border-box;
 }
 
+.toggle[hidden] {
+  display: none;
+}
+
 .toggle .checkbox svg {
   width: 12px;
   height: 12px;
@@ -467,7 +471,7 @@ button {
   height: 4px;
   margin: 10px 0 7px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #f4c16d 0%, #e7e2d4 48%, #a9b7c6 100%);
+  background: linear-gradient(90deg, #eebd85 0%, #e9e6dd 50%, #d9b0a0 100%);
   outline: none;
   cursor: pointer;
 }
