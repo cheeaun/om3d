@@ -5,9 +5,10 @@
     <link rel="icon" type="image/png" href="./assets/favicon-DnulDWOY.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Singapore buildings 3D Tiles</title>
-    <script type="module" crossorigin src="./assets/index-DLbv6xxb.js"></script>
+    <script type="module" crossorigin src="./assets/main-Q29ewKYk.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/three.core-DFHh0sxs.js">
-    <link rel="stylesheet" crossorigin href="./assets/index-PXqkoHDe.css">
+    <link rel="modulepreload" crossorigin href="./assets/meshopt_decoder.module-uhYQKgYh.js">
+    <link rel="stylesheet" crossorigin href="./assets/main-FaLvjpPt.css">
   </head>
   <body>
     <div id="status">Loading basemap…</div>
@@ -210,9 +211,30 @@
           <span>Lighting</span>
         </button>
         <p id="quality-note" class="settings-note"></p>
-        <button id="copy-debug" class="settings-action" type="button">
-          Copy debug info
-        </button>
+        <div class="settings-row">
+          <button id="copy-debug" class="settings-action" type="button">
+            Copy debug info
+          </button>
+          <a
+            id="export-link"
+            class="settings-action settings-link"
+            href="export/"
+            target="_blank"
+            rel="noopener"
+          >
+            <span>Export</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M14 4h6v6M20 4l-8.5 8.5M18 14.5V19a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19V7.5A1.5 1.5 0 0 1 5 6h4.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </a>
+        </div>
         <footer class="settings-footer">
           <a
             href="https://github.com/cheeaun/om3d"
