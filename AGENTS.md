@@ -71,6 +71,38 @@ tiles load — which makes on-screen verification impossible.
 
 ## Rendering notes
 
+- **The render loop is on demand, not free-running.** `animate()` still requests
+  every frame, but returns early unless there is something to draw: the camera
+  moved (`controls.update()` returns `true` while damping/inertia eases), a setter
+  called `requestFrame()`, tiles or basemap textures are in flight, a shadow map
+  is dirty and not move-paused, or the lighting fade is running. There is no
+  ambient animation, so a parked view draws zero frames — that is the intended
+  behaviour, not a stall. Anything that changes the canvas outside a camera move
+  **must** call `requestFrame()` or it will not appear until the next pan. This
+  is wired for tile `needs-update`/`load-model`/`dispose-model`/
+  `tile-visibility-change`, basemap arrival and level cleanup, the tilejson
+  retry, `applyLighting()`, `setShadows`, `setTiltShift`, `applyQuality`, `start`,
+  `onResize`, the 180 ms move-idle timer and the `controls` `change` event. Do
+  not add an animation that relies on the loop running while idle.
+  `om3dMemory().view.framesDrawn` / `framesSkipped` prove it either way.
+- Three traps in that gate, each of which broke it once: `aoDirty` cannot be a
+  reason to draw (with AO off it is never consumed, so the loop would never park);
+  `stats.loaded` is the resident tile count and never returns to zero, so only
+  `queued + downloading + parsing` mean busy; and the root `tileset.json` fetch is
+  invisible in `stats`, so `3d-tiles-renderer`'s `needs-update` event is what
+  restarts the loop after it parks — without it the 3D layer never starts.
+- Tile LOD needs no relaxation layer, and adding one is wasted work. Under this
+  orthographic camera `3d-tiles-renderer` computes a tile's error as
+  `geometricError / pixelSize` with `distanceFromCamera = Infinity`
+  (`TilesRenderer.js` `calculateTileViewError`), so Cesium-style distance-based
+  screen-space-error relaxation (`dynamicScreenSpaceError`, Navara's `lodFog`)
+  has nothing to act on. And `pixelSize` comes from the projection matrix
+  (`2 / projection[0]`, `2 / projection[5]`), which already includes
+  `camera.zoom`, so zooming out coarsens LOD by itself. A pitch-relaxed
+  `errorTarget` was measured (1.8x moved 121 -> 119 visible tiles; 4x reached
+  105 but looked visibly coarser) and reverted. Tilted views do hold more tiles
+  (69 -> 121 from pitch 45 to 15) because the frustum footprint really grows,
+  not because the LOD is wrong.
 - The camera is orthographic. Its `camera.zoom` is not Mapbox zoom: initial
   zoom `2` ≈ Mapbox z16.5, and `maxZoom = 91` ≈ z22. Keep that mapping when
   adjusting framing.
@@ -203,10 +235,20 @@ tiles load — which makes on-screen verification impossible.
 - Low pauses shadows while `basemapMoving`: it sets `sun.shadow.intensity = 0`,
   hides the catcher, and skips both the shadow-map and coverage passes. The idle
   timer restores them and marks `shadowDirty`. Low also disables the coverage
-  pass and `displayActiveTiles`; medium/high keep both. Tile loading, tile
-  visibility changes, and dispose events set `shadowDirty`, so during streaming
-  medium/high can re-render the 10 km shadow map and coverage pass every frame —
-  throttle or coalesce those updates before touching quality.
+  pass and `displayActiveTiles`; medium/high keep both.
+- **Streaming shadow rebuilds are coalesced, and that coalescing is deliberate.**
+  Tile loading, visibility changes and dispose events all set `shadowDirty`, so
+  unthrottled this re-rendered the 10 km shadow map plus the coverage pass on
+  almost every frame of a pan: measured **81 rebuilds over 110 drawn frames**.
+  `canRebuildShadows()` now limits rebuilds to one per
+  `SHADOW_STREAM_INTERVAL_MS` (200 ms) **only while `isStreamingActive()`**,
+  which took it to 20 and still converges to `shadowDirty === false` once tiles
+  settle. Two rules must be kept: a moved shadow camera (`shadowCameraMoved`,
+  set by `updateShadowCamera()` when the sun or the snapped focus changes) must
+  **always** bypass the throttle, because the map is sampled relative to the sun
+  camera and a delayed rebuild leaves shadows offset from their geometry; and a
+  low-tier move pause still wins over both. `om3dMemory().view.shadowRebuilds`
+  counts them, so any regression here is visible.
 - Anti-aliasing is 4x MSAA on both renderer paths. `antialias: true` covers the
   direct canvas render (low quality); the WebGL `EffectComposer` gets an
   explicit `HalfFloatType` target with `samples: 4`, and the WebGPU `pass()`

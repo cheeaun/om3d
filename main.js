@@ -594,6 +594,17 @@ let aoStrengthNode = null;
 let aoStrength = 0;
 let aoDirty = true;
 let aoUpdateThisFrame = false;
+
+// The scene is static unless something changes: there is no ambient animation,
+// and the water and its reflection are deliberately still. So the loop only does
+// work on a frame where the camera moved, an external setter invalidated the
+// view, or a tile/basemap request is still in flight; otherwise it returns
+// immediately. That keeps a parked phone off the GPU instead of redrawing an
+// unchanged image at 60 fps. Anything that mutates the scene outside the frame
+// must call requestFrame(), or it will not be drawn until the next camera move.
+let needsRender = true;
+let framesDrawn = 0;
+let framesSkipped = 0;
 const aoViewMatrix = new THREE.Matrix4();
 let aoViewZoom = Number.NaN;
 if (isWebGPU) {
@@ -741,6 +752,13 @@ function setAOEnabled(enabled) {
 }
 
 updateTiltShiftResolution();
+
+// Marks the next frame as worth drawing. Called by anything that changes what
+// the canvas shows without going through a camera move: tile arrivals, basemap
+// levels, lighting and shadow toggles, the sun slider, quality changes, resizes.
+function requestFrame() {
+  needsRender = true;
+}
 
 let panPointer = null;
 let rotatePointer = null;
@@ -1201,6 +1219,10 @@ fill.position.set(1500, 1300, 1600);
 scene.add(fill, fill.target);
 
 let shadowDirty = true;
+let shadowRebuilds = 0;
+// Set when the shadow camera (sun/focus) moved this frame; bypasses the
+// streaming throttle so shadows never lag the geometry.
+let shadowCameraMoved = false;
 let lastShadowFocusX = Infinity;
 let lastShadowFocusZ = Infinity;
 let lastShadowDirX = Infinity;
@@ -1325,7 +1347,13 @@ function updateShadowCamera() {
     shadowGround.position.set(snappedX, BASEMAP_Y + 1, snappedZ);
   }
 
-  if (shadowsEnabled) shadowDirty = true;
+  if (shadowsEnabled) {
+    shadowDirty = true;
+    // A moved shadow camera must re-render at once: the map is sampled relative
+    // to the sun camera, so a delayed rebuild leaves the shadows offset from the
+    // geometry they belong to. Only tile churn may be coalesced.
+    shadowCameraMoved = true;
+  }
 }
 
 const DEBUG_LOG = params.get('debug') === '1';
@@ -1486,6 +1514,9 @@ function collectMemoryInfo() {
   return {
     view: {
       cameraZoom: Number(camera.zoom.toFixed(2)),
+      framesDrawn,
+      framesSkipped,
+      shadowRebuilds,
       mapZoom: Number(
         Math.log2(
           (METERS_PER_PX_BASE * window.innerHeight * camera.zoom) /
@@ -1631,12 +1662,19 @@ const LOG_INTERVAL_MS = 220;
 let lastViewLogAt = 0;
 
 controls.addEventListener('change', () => {
+  // Covers every camera change, including the ones applied by an inner
+  // `controls.update()` call (pan inertia, the rotate/tilt tweens) that consume
+  // the change flag before this frame's own `update()` can report it.
+  requestFrame();
   basemapMoving = true;
   clearTimeout(basemapMoveTimer);
   basemapMoveTimer = setTimeout(() => {
     basemapMoving = false;
     if (shadowsEnabled) shadowDirty = true;
     if (DEBUG_LOG) logViewState('idle');
+    // The idle transition is what un-pauses shadows on low and lets the basemap
+    // LOD sharpen, so it has to draw even if the camera never moved again.
+    requestFrame();
   }, 180);
 
   if (!DEBUG_LOG) return;
@@ -2078,12 +2116,15 @@ function removeBasemapMesh(key, mesh) {
 }
 
 function removeObsoleteLevels() {
+  let removed = false;
   for (const [key, mesh] of basemapMeshes) {
     const zoom = Number(key.split('/')[0]);
     if (zoom !== basemapState.zoom) {
       removeBasemapMesh(key, mesh);
+      removed = true;
     }
   }
+  if (removed) requestFrame();
 }
 
 function resetBasemap() {
@@ -2137,6 +2178,12 @@ function loadOpenfreemapTileTemplate() {
     })
     .finally(() => {
       openfreemapTileTemplatePromise = null;
+      // The retry is driven from updateBasemap() on a frame, so wake the loop
+      // when there is still no template; otherwise a failed fetch while idle
+      // would leave the basemap empty until the next camera move.
+      if (!openfreemapTileTemplate) {
+        setTimeout(requestFrame, OPENFREEMAP_TILEJSON_RETRY_MS);
+      }
     });
 
   return openfreemapTileTemplatePromise;
@@ -2155,6 +2202,7 @@ function ensureOpenfreemapTileTemplate() {
     if (!template) return;
     lastBasemapView = null;
     updateBasemap();
+    requestFrame();
   });
 }
 
@@ -2912,6 +2960,7 @@ function pumpBasemapQueue() {
         task.material.color.copy(basemapTint);
         task.material.needsUpdate = true;
         task.mesh.visible = true;
+        requestFrame();
       })
       .catch(() => {})
       .finally(() => {
@@ -2945,6 +2994,7 @@ function start() {
   camera.updateMatrixWorld();
   updateBasemap();
   hideBasemapStatus();
+  requestFrame();
 }
 
 const sunControls = document.getElementById('sun-controls');
@@ -3218,6 +3268,8 @@ function applyLighting() {
       water.waterFadeColor ?? water.material?.uniforms?.waterFadeColor;
     if (waterFade?.value) waterFade.value.copy(skyColor);
   }
+
+  requestFrame();
 }
 
 function updateLightingBlend({ immediate = false } = {}) {
@@ -3613,6 +3665,7 @@ function setShadows(enabled) {
     button.setAttribute('aria-pressed', String(enabled));
     button.title = enabled ? 'Shadows on' : 'Shadows off';
   }
+  requestFrame();
 }
 
 const startButton = document.getElementById('start-button');
@@ -3718,6 +3771,7 @@ function applyQuality(tier, { persist = true } = {}) {
   resetBasemap();
   updateBasemap();
   updateQualityUI();
+  requestFrame();
 }
 
 const settingsButton = document.getElementById('settings');
@@ -3864,6 +3918,7 @@ function setTiltShift(enabled) {
     tiltShiftButton.setAttribute('aria-pressed', String(enabled));
     tiltShiftButton.title = enabled ? 'Tilt shift on' : 'Tilt shift off';
   }
+  requestFrame();
 }
 
 if (tiltShiftButton) {
@@ -4299,16 +4354,24 @@ function createTilesRenderer(url) {
   const resolution = new THREE.Vector2();
   renderer.getSize(resolution).multiplyScalar(renderer.getPixelRatio());
   tilesRenderer.setResolution(camera, resolution);
+  tilesRenderer.addEventListener('needs-update', () => {
+    // Fired when the engine has work that only a frame can advance: a loaded
+    // tileset JSON, a parsed tile wanting a traversal. This is what restarts the
+    // loop after it parks, since none of that shows up in `stats` first.
+    requestFrame();
+  });
   tilesRenderer.addEventListener('load-model', ({ scene: tileScene }) => {
     tilesLoadedTotal++;
     applyTilesMaterial(tileScene);
     aoDirty = true;
     if (shadowsEnabled) shadowDirty = true;
+    requestFrame();
   });
   tilesRenderer.addEventListener('dispose-model', () => {
     tilesDisposedTotal++;
     aoDirty = true;
     if (shadowsEnabled) shadowDirty = true;
+    requestFrame();
   });
   tilesRenderer.addEventListener('tile-visibility-change', ({ tile }) => {
     if (tile?.engineData?.scene) {
@@ -4316,6 +4379,7 @@ function createTilesRenderer(url) {
     }
     aoDirty = true;
     if (shadowsEnabled) shadowDirty = true;
+    requestFrame();
   });
   tilesRenderer.forEachLoadedModel((tileScene) => {
     applyTilesMaterial(tileScene);
@@ -4335,6 +4399,21 @@ function updateTilesResolution() {
   tiles.setResolution(camera, tileResolution);
 }
 
+// Tile streaming sets `shadowDirty` on every load/dispose/visibility event, so
+// without a limit the 10 km shadow map and the coverage pass re-render on almost
+// every frame of a pan: measured 81 rebuilds over 110 drawn frames. Coalesce them
+// to at most one per interval while tiles are arriving; once streaming settles the
+// full-rate path resumes, so shadows still converge to the final tile set.
+const SHADOW_STREAM_INTERVAL_MS = 200;
+let lastShadowRebuildAt = -Infinity;
+
+function canRebuildShadows(now) {
+  if (!shadowsEnabled || !shadowDirty || isShadowPaused()) return false;
+  if (shadowCameraMoved) return true;
+  if (!isStreamingActive()) return true;
+  return now - lastShadowRebuildAt >= SHADOW_STREAM_INTERVAL_MS;
+}
+
 function onResize() {
   const nextAspect = window.innerWidth / window.innerHeight;
   camera.left = (-VIEW_SIZE * nextAspect) / 2;
@@ -4350,13 +4429,55 @@ function onResize() {
   updateTiltShiftResolution();
   updateTilesResolution();
   aoDirty = true;
+  requestFrame();
 }
 
 window.addEventListener('resize', onResize);
 
+// True while tiles or basemap textures are still arriving. Streaming has to keep
+// drawing: a `load-model` can land with no camera move, and the tile queue only
+// advances inside `tiles.update()`. `stats.loaded` is the resident count (it
+// never returns to zero), so only the in-flight counters count as busy. The root
+// `tileset.json` and queued-but-not-yet-requested tiles are not visible in
+// `stats`, so the renderer's own `needs-update` event also calls requestFrame().
+function isStreamingActive() {
+  if (
+    basemapActiveLoads > 0 ||
+    basemapTileQueue.length > 0 ||
+    basemapRequests.size > 0
+  ) {
+    return true;
+  }
+  if (!tiles || !tiles.group.visible) return false;
+  const stats = tiles.stats;
+  return stats.queued + stats.downloading + stats.parsing > 0;
+}
+
 function animate() {
   requestAnimationFrame(animate);
-  controls.update();
+
+  // `controls.update()` returns true while damping or inertia is still easing,
+  // and false once the camera has settled, so it doubles as the movement test.
+  const moved = controls.update();
+
+  // Everything that may have changed what the canvas shows, including work this
+  // frame would start (a streaming tile, a shadow map). `aoDirty` is deliberately
+  // not a reason on its own: with AO off it is never consumed, so it would pin the
+  // loop on forever.
+  const wantFrame =
+    moved ||
+    needsRender ||
+    isStreamingActive() ||
+    (shadowsEnabled && shadowDirty && !isShadowPaused()) ||
+    lightingBlendFrame !== null;
+
+  if (!wantFrame) {
+    framesSkipped++;
+    return;
+  }
+
+  framesDrawn++;
+  needsRender = false;
   updateShadowCamera();
   updateFog();
   camera.updateMatrixWorld();
@@ -4397,10 +4518,16 @@ function animate() {
     shadowGround.visible = shadowsEnabled && !shadowsPaused;
   }
 
-  if (shadowsEnabled && shadowDirty && !shadowsPaused) {
+  if (canRebuildShadows(performance.now())) {
+    shadowRebuilds++;
+    lastShadowRebuildAt = performance.now();
+    shadowCameraMoved = false;
     renderer.shadowMap.needsUpdate = true;
     if (isCoverageEnabled()) renderCoverage();
     shadowDirty = false;
+  } else if (shadowDirty && shadowCameraMoved && !isShadowPaused()) {
+    // Should not happen (a moved camera always rebuilds), but never drop it.
+    requestFrame();
   }
 
   if (gpuWaterReflection) {
