@@ -27,9 +27,10 @@ Features
 - **Optional shadows.** A time-of-day sun casts shadows through a tinted
   catcher; shadow map resolution follows the quality tier.
 - **Optional time-of-day lighting.** A sun slider moves the sun by true solar
-  elevation for the current date, re-tinting the key/fill/hemisphere lights,
-  sky, fog, basemap, and water together. The panel shows sunrise/sunset and a
-  Dawn/Day/Dusk phase, with a button to snap back to the current time.
+  elevation, re-tinting the key/fill/hemisphere lights, sky, fog, basemap, and
+  water together. The panel shows sunrise/sunset and a Dawn/Day/Dusk phase, with
+  a date picker covering ±50 years (shareable via `?date=YYYY-MM-DD`) and a
+  "Now" button to snap back to today and the current time.
 - **Ambient occlusion and contact shade.** GTAO darkens building joints, and a
   soft ground-level shade grounds the buildings (medium/high tiers).
 - **Tilt shift and vignette.** A depth-of-field-style blur fades in at low zoom
@@ -169,10 +170,13 @@ npm run build-toy-tiles
 Append `?tiles=<path-to-tileset.json>` to the dev URL to preview another
 tileset. The page defaults to `optimized-tiles`.
 
-Use `?shadows=1` to start with shadows enabled, and `?renderer=webgl`,
-`?renderer=webgl2`, or `?renderer=webgpu` to pick the renderer (the default is
-WebGPU with a WebGL fallback). The settings gear (top right) holds Quality
-(Low / Medium / High), tilt shift, and shadows; Quality also accepts
+Use `?shadows=1` to start with shadows enabled and `?lighting=1` for
+time-of-day lighting. `?date=YYYY-MM-DD` opens the sun panel on that Singapore
+calendar date (clamped to ±50 years from today); changing the date in the panel
+updates the URL. Use `?renderer=webgl`, `?renderer=webgl2`, or
+`?renderer=webgpu` to pick the renderer (the default is WebGPU with a WebGL
+fallback). The settings gear (top right) holds Quality (Low / Medium / High),
+tilt shift, shadows, and lighting; Quality also accepts
 `?quality=low|medium|high`. Add `?debug=1` to log the view state during camera
 moves. The basemap is OpenFreeMap vector tiles and needs no API key.
 

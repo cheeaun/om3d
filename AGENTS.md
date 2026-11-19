@@ -197,6 +197,22 @@ tiles load — which makes on-screen verification impossible.
   `sky` is the horizon/fog colour and `skyTop` is the zenith colour for the sky
   gradient. `?lighting=1` enables it at startup (works with or without
   `?shadows=1`).
+- The sun panel's date is not fixed to "today". `#sun-date-input` is a native
+  date picker bounded to ±`SUN_DATE_YEARS` (50) around the current SGT day;
+  `clampSunDate()` enforces the same window for `?date=YYYY-MM-DD` links. Dates
+  are built as noon SGT (`T12:00:00+08:00`) and read back with
+  `formatSunISODate()`'s `formatToParts`, so a shared link resolves to the same
+  Singapore calendar day everywhere. `getSunDaylight()` re-runs
+  `SunCalc.getTimes()` for the chosen date (with a 06:00–18:00 SGT fallback if
+  invalid) and `applySunDate()` rebuilds `sunriseMs`/`sunsetMs`, the slider
+  range and the sunrise/sunset labels, then calls `updateSunFromSlider()`. Keep
+  that as the single path that turns the slider into sun direction and lighting,
+  so a date change cannot drift from a slider change. Changing the date keeps
+  the slider's normalised fraction; "Now" (`setSunToNow()`) resets both date and
+  time and clears the param. User-initiated changes sync `?date=` with
+  `replaceState`, and an out-of-range link is normalised on load. The chosen
+  date is reported as `lighting.date` in `buildViewInfo()`. Date handling is
+  pure JS — no renderer-specific work is needed.
 - The sky above the map is a gradient plane (`skyPlane`), not a dome: an
   orthographic camera has no horizon, so `updateSky()` fits a camera-facing
   plane to the strip between the camera far plane's screen row and the top of
@@ -558,6 +574,9 @@ canvas allocations and one live bitmap per loaded basemap tile.
   settings panel.
 - `?lighting=1` starts with time-of-day lighting enabled; the `#lighting`
   toggle is in the settings panel and works with or without shadows.
+- `?date=YYYY-MM-DD` opens the sun panel on that Singapore calendar date,
+  clamped to ±50 years from today. Changing the date in the panel updates the
+  URL with `replaceState`; "Now" resets the date and clears the param.
 - `?renderer=webgl` uses the classic `WebGLRenderer` (with `EffectComposer`).
   `?renderer=webgl2` uses the node renderer with `forceWebGL: true`, i.e. the
   WebGPU-style path on a WebGL2 backend. `?renderer=webgpu` forces the node

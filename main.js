@@ -1886,6 +1886,7 @@ function buildViewInfo(label) {
     },
     lighting: {
       enabled: lightingEnabled,
+      date: sunDate ? formatSunISODate(sunDate) : null,
       blend: fmt(lightingBlend, 2),
       elevation: fmt(lightingElevationDeg, 1),
       phase: getLightingPhase(),
@@ -3281,10 +3282,14 @@ const sunriseTimeEl = document.getElementById('sunrise-time');
 const sunsetTimeEl = document.getElementById('sunset-time');
 const sunTimeEl = document.getElementById('sun-time');
 const sunDateEl = document.getElementById('sun-date');
+const sunDateInput = document.getElementById('sun-date-input');
 const sunResetButton = document.getElementById('sun-reset');
 
 const SUN_TIME_ZONE = 'Asia/Singapore';
 const SUN_UTC_OFFSET_MINUTES = 8 * 60;
+// Far enough to cover a lifetime of past and future dates, near enough that
+// SunCalc's solar model stays accurate.
+const SUN_DATE_YEARS = 50;
 const sunTimeFormatter = new Intl.DateTimeFormat('en-SG', {
   timeZone: SUN_TIME_ZONE,
   hour: 'numeric',
@@ -3297,19 +3302,152 @@ const sunDateFormatter = new Intl.DateTimeFormat('en-SG', {
   day: 'numeric',
   month: 'short',
 });
+const sunISODateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: SUN_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
 
 function formatSunTime(date) {
   return sunTimeFormatter.format(date).toUpperCase();
 }
 
+function formatSunISODate(date) {
+  const parts = sunISODateFormatter.formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+// A YYYY-MM-DD string is a calendar day in Singapore, not UTC midnight, so a
+// shared `?date=` link resolves to the same day everywhere.
+function parseSunISODate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || '');
+  if (!match) return null;
+  const date = new Date(`${match[0]}T12:00:00+08:00`);
+  if (Number.isNaN(date.getTime()) || formatSunISODate(date) !== match[0]) {
+    return null;
+  }
+  return date;
+}
+
+function shiftSunYears(date, years) {
+  const shifted = new Date(date.getTime());
+  const day = shifted.getUTCDate();
+  shifted.setUTCDate(1);
+  shifted.setUTCFullYear(shifted.getUTCFullYear() + years);
+  const daysInMonth = new Date(
+    Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  shifted.setUTCDate(Math.min(day, daysInMonth));
+  return shifted;
+}
+
+function sunDateBounds() {
+  const today = parseSunISODate(formatSunISODate(new Date()));
+  return {
+    lower: shiftSunYears(today, -SUN_DATE_YEARS),
+    upper: shiftSunYears(today, SUN_DATE_YEARS),
+  };
+}
+
+function clampSunDate(date) {
+  const { lower, upper } = sunDateBounds();
+  if (date.getTime() < lower.getTime()) return lower;
+  if (date.getTime() > upper.getTime()) return upper;
+  return date;
+}
+
+let sunDate = null;
+let sunriseMs = null;
+let sunsetMs = null;
+
 function setSunDate(date) {
+  sunDate = date;
   if (sunDateEl) {
     sunDateEl.textContent = `${sunDateFormatter.format(date)} · SGT`;
   }
+  if (sunDateInput) {
+    sunDateInput.value = formatSunISODate(date);
+  }
 }
 
-let sunriseMs = null;
-let sunsetMs = null;
+function syncSunDateUrl(date) {
+  try {
+    const url = new URL(window.location.href);
+    if (formatSunISODate(date) === formatSunISODate(new Date())) {
+      url.searchParams.delete('date');
+    } else {
+      url.searchParams.set('date', formatSunISODate(date));
+    }
+    window.history.replaceState(null, '', url);
+  } catch {
+    // Some hosting contexts disallow replaceState; the panel still works.
+  }
+}
+
+function getSunDaylight(date) {
+  const times = SunCalc.getTimes(
+    date,
+    CENTER.lat,
+    CENTER.lon,
+    0,
+    SUN_UTC_OFFSET_MINUTES,
+  );
+  let sunrise = times.sunrise;
+  let sunset = times.sunset;
+
+  if (
+    !sunrise ||
+    !sunset ||
+    !Number.isFinite(sunrise.getTime()) ||
+    !Number.isFinite(sunset.getTime()) ||
+    sunset <= sunrise
+  ) {
+    const iso = formatSunISODate(date);
+    sunrise = new Date(`${iso}T06:00:00+08:00`);
+    sunset = new Date(`${iso}T18:00:00+08:00`);
+  }
+  return { sunrise, sunset };
+}
+
+function sunFractionAt(date, sunrise, sunset) {
+  return THREE.MathUtils.clamp(
+    (date.getTime() - sunrise.getTime()) /
+      Math.max(1, sunset.getTime() - sunrise.getTime()),
+    0,
+    1,
+  );
+}
+
+function currentSliderFraction() {
+  const max = Math.max(1, Number(sunSlider?.max) || 1);
+  return THREE.MathUtils.clamp(Number(sunSlider?.value || 0) / max, 0, 1);
+}
+
+function applySunDate(date, fraction) {
+  if (!sunSlider) return;
+  const chosen = clampSunDate(date);
+  setSunDate(chosen);
+
+  const { sunrise, sunset } = getSunDaylight(chosen);
+  sunriseMs = sunrise.getTime();
+  sunsetMs = sunset.getTime();
+
+  const daylightMinutes = Math.max(
+    1,
+    Math.round((sunsetMs - sunriseMs) / 60000),
+  );
+  sunSlider.min = '0';
+  sunSlider.max = String(daylightMinutes);
+  sunSlider.value = String(
+    Math.round(THREE.MathUtils.clamp(fraction, 0, 1) * daylightMinutes),
+  );
+
+  if (sunriseTimeEl) sunriseTimeEl.textContent = formatSunTime(sunrise);
+  if (sunsetTimeEl) sunsetTimeEl.textContent = formatSunTime(sunset);
+  updateSunFromSlider();
+}
 
 // --- Time-of-day lighting -------------------------------------------------
 // The sun slider already moves the real SunCalc direction. These presets turn
@@ -3831,73 +3969,50 @@ function updateSunFromSlider() {
   if (shadowsEnabled) shadowDirty = true;
 }
 
-function setSunToNow() {
-  if (!sunSlider || sunriseMs === null || sunsetMs === null) return;
+function setSunToNow(syncUrl = false) {
+  if (!sunSlider) return;
 
   const now = new Date();
-  const nowMs = THREE.MathUtils.clamp(now.getTime(), sunriseMs, sunsetMs);
-  sunSlider.value = String(Math.round((nowMs - sunriseMs) / 60000));
-  updateSunFromSlider();
-  setSunDate(now);
+  const today = parseSunISODate(formatSunISODate(now)) || now;
+  const { sunrise, sunset } = getSunDaylight(today);
+  applySunDate(today, sunFractionAt(now, sunrise, sunset));
+  if (syncUrl) syncSunDateUrl(today);
 }
 
 if (sunSlider) {
-  const now = new Date();
-  const times = SunCalc.getTimes(
-    now,
-    CENTER.lat,
-    CENTER.lon,
-    0,
-    SUN_UTC_OFFSET_MINUTES,
-  );
-  let sunrise = times.sunrise;
-  let sunset = times.sunset;
-
-  if (
-    !sunrise ||
-    !sunset ||
-    !Number.isFinite(sunrise.getTime()) ||
-    !Number.isFinite(sunset.getTime()) ||
-    sunset <= sunrise
-  ) {
-    const base = new Date(now);
-    sunrise = new Date(
-      base.getFullYear(),
-      base.getMonth(),
-      base.getDate(),
-      6,
-      0,
-      0,
-    );
-    sunset = new Date(
-      base.getFullYear(),
-      base.getMonth(),
-      base.getDate(),
-      18,
-      0,
-      0,
-    );
+  if (sunDateInput) {
+    const bounds = sunDateBounds();
+    sunDateInput.min = formatSunISODate(bounds.lower);
+    sunDateInput.max = formatSunISODate(bounds.upper);
   }
 
-  sunriseMs = sunrise.getTime();
-  sunsetMs = sunset.getTime();
-
-  const daylightMinutes = Math.max(
-    1,
-    Math.round((sunsetMs - sunriseMs) / 60000),
-  );
-  sunSlider.min = '0';
-  sunSlider.max = String(daylightMinutes);
-
-  if (sunriseTimeEl) sunriseTimeEl.textContent = formatSunTime(sunrise);
-  if (sunsetTimeEl) sunsetTimeEl.textContent = formatSunTime(sunset);
-  setSunDate(now);
-  setSunToNow();
+  const now = new Date();
+  const paramDate = parseSunISODate(params.get('date'));
+  const initialDate = paramDate
+    ? clampSunDate(paramDate)
+    : parseSunISODate(formatSunISODate(now)) || now;
+  const { sunrise, sunset } = getSunDaylight(initialDate);
+  applySunDate(initialDate, sunFractionAt(now, sunrise, sunset));
+  // A link outside the supported window is clamped; keep the URL honest.
+  if (paramDate) syncSunDateUrl(initialDate);
   sunSlider.addEventListener('input', updateSunFromSlider);
 }
 
+if (sunDateInput) {
+  sunDateInput.addEventListener('change', () => {
+    const parsed = parseSunISODate(sunDateInput.value);
+    if (!parsed) {
+      if (sunDate) sunDateInput.value = formatSunISODate(sunDate);
+      return;
+    }
+    const chosen = clampSunDate(parsed);
+    applySunDate(chosen, currentSliderFraction());
+    syncSunDateUrl(chosen);
+  });
+}
+
 if (sunResetButton) {
-  sunResetButton.addEventListener('click', setSunToNow);
+  sunResetButton.addEventListener('click', () => setSunToNow(true));
 }
 
 function setShadows(enabled) {
