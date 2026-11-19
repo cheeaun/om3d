@@ -12,6 +12,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { Water } from './webgl-water.js';
 import { VectorTile } from '@mapbox/vector-tile';
 import Protobuf from 'pbf';
@@ -19,8 +20,35 @@ import { SINGAPORE_OUTLINE } from './singapore-outline.js';
 const TILT_SHIFT_BAND_START = 0.16;
 const TILT_SHIFT_BAND_END = 0.82;
 const TILT_SHIFT_RADIUS = 10;
-const TILT_SHIFT_LOD_FULL_ZOOM = 3;
-const TILT_SHIFT_LOD_NONE_ZOOM = 10;
+// uv.y of the sharp row used when the depth buffer cannot be read.
+const TILT_SHIFT_DEFAULT_FOCUS = 0.5;
+// A tap (not a hover) sets the focus, and the focus is the depth under the tapped
+// pixel, so a building behind the one you tap blurs even when it sits at the same
+// height on screen. A drag pans the map instead and must not disturb the focus.
+const TILT_SHIFT_TAP_SLOP = 8;
+// The focal half-band is a fraction of the ground depth span across the screen
+// (`halfRange`), i.e. of the depth range actually visible, so a neighbourhood
+// stays sharp and only clearly farther or nearer geometry blurs. Basing it on the
+// view height instead is far too tight at a tilt: at pitch 15 the ground spans
+// ~490 m, so a 110 m band blurred the buildings next door.
+//
+// The floor keeps the band usable pointed straight down, where `halfRange`
+// collapses to nothing and only building height separates depths.
+const TILT_SHIFT_DOF_SPAN = 0.8;
+const TILT_SHIFT_DOF_MIN = 0.5;
+// Rise thresholds for the depth term, in fractions of the half-band. Below SHARP
+// the pixel is in focus; at BLURRED it is fully blurred. A separate plateau is
+// needed because `TILT_SHIFT_BAND_START` (0.16) starts blurring almost at once,
+// which is right for a screen band but far too eager for depth.
+const TILT_SHIFT_DOF_SHARP = 0.3;
+const TILT_SHIFT_DOF_BLURRED = 1.0;
+// Tilt shift stays a small-scale effect: fade it out as the camera zooms in and
+// the tile LOD switches to detailed geometry, which reads as mush when blurred.
+// The fade has to reach well past overview zooms or the effect is invisible in
+// the mid-zoom views where it is actually useful: full strength to zoom 5, gone
+// by 18.
+const TILT_SHIFT_LOD_FULL_ZOOM = 5;
+const TILT_SHIFT_LOD_NONE_ZOOM = 18;
 const VIGNETTE_STRENGTH = 0.06;
 const CLAY_BASE_SHADE = 0.85;
 const CLAY_BASE_SHADE_HEIGHT = 6;
@@ -60,36 +88,130 @@ const FOG_FAR_END = 0.82;
 const FOG_CULL_SLACK = 80;
 const FOG_CULL_STEP = 0.04;
 
+// Separable Gaussian: one 1D pass across, one down. The old single pass sampled a
+// 7x7 grid, which at full radius (10 px) spaced its taps 3.3 px apart — the result
+// read as ghosted copies of the image rather than a smooth gradient, and it cost
+// 49 fetches to do it. Two passes of 9 1D taps land 1.25 px apart for 18 fetches:
+// smoother *and* 2.7x cheaper. 13 taps was tried and is visually identical, so the
+// extra fetches buy nothing. Weights are normalised per axis, so the 2D kernel is
+// exactly their outer product.
+const TILT_SHIFT_TAPS = 9;
 const TILT_SHIFT_KERNEL = (() => {
-  const offsets = [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1];
   const sigma = 0.55;
-  const kernel = [];
+  const half = (TILT_SHIFT_TAPS - 1) / 2;
+  const taps = [];
   let sum = 0;
-  for (const y of offsets) {
-    for (const x of offsets) {
-      const weight = Math.exp(-(x * x + y * y) / (2 * sigma * sigma));
-      kernel.push({ x, y, weight });
-      sum += weight;
-    }
+  for (let i = 0; i < TILT_SHIFT_TAPS; i++) {
+    const offset = (i - half) / half; // -1 .. 1
+    const weight = Math.exp(-(offset * offset) / (2 * sigma * sigma));
+    taps.push({ offset, weight });
+    sum += weight;
   }
-  return kernel.map(({ x, y, weight }) => ({
-    x,
-    y,
+  return taps.map(({ offset, weight }) => ({
+    offset,
     weight: weight / sum,
   }));
 })();
 
 const tiltShiftSampleCode = TILT_SHIFT_KERNEL.map(
-  ({ x, y, weight }) =>
-    `      color += texture2D( tDiffuse, vUv + vec2( ${x.toFixed(4)}, ${y.toFixed(4)} ) * texel ) * ${weight.toFixed(6)};`,
+  ({ offset, weight }) =>
+    `        color += texture2D( tDiffuse, vUv + direction * ( ${offset.toFixed(4)} * texel ) ) * ${weight.toFixed(6)};`,
 ).join('\n');
+
+// Copies the scene depth out of the composer so the blur pass can read it.
+//
+// The composer ping-pongs two targets: the current frame's depth only exists in
+// the target `RenderPass` just wrote, and by blur time that target is the one
+// being written, so sampling it would be a feedback loop. Running this copy right
+// after the scene render sidesteps that. It stores the raw depth at half
+// resolution in a float channel — no conversion, because the focus distance is
+// read back out of it at the pointer's texel.
+const TiltShiftDepthShader = {
+  uniforms: {
+    tDepth: { value: null },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDepth;
+    varying vec2 vUv;
+
+    void main() {
+      gl_FragColor = vec4( texture2D( tDepth, vUv ).r, 0.0, 0.0, 1.0 );
+    }
+  `,
+};
+
+class TiltShiftDepthPass {
+  constructor() {
+    this.enabled = true;
+    this.needsSwap = false;
+    this.renderToScreen = false;
+    this.clear = false;
+    // Float, not half: the far plane is 200 km, and a 10-bit mantissa would
+    // quantise the focus distance into hundreds of metres.
+    this.target = new THREE.WebGLRenderTarget(1, 1, {
+      type: THREE.FloatType,
+      format: THREE.RedFormat,
+      depthBuffer: false,
+    });
+    this.target.texture.name = 'TiltShift.depth';
+    this.material = new THREE.ShaderMaterial(TiltShiftDepthShader);
+    this.quad = new FullScreenQuad(this.material);
+  }
+
+  setSize(width, height) {
+    this.target.setSize(
+      Math.max(1, Math.round(width / 2)),
+      Math.max(1, Math.round(height / 2)),
+    );
+  }
+
+  render(renderer, writeBuffer, readBuffer) {
+    this.material.uniforms.tDepth.value = readBuffer.depthTexture;
+    renderer.setRenderTarget(this.target);
+    this.quad.render(renderer);
+  }
+
+  dispose() {
+    this.target.dispose();
+    this.material.dispose();
+    this.quad.dispose();
+  }
+}
 
 const TiltShiftShader = {
   uniforms: {
     tDiffuse: { value: null },
+    tDepth: { value: null },
     resolution: { value: new THREE.Vector2(1, 1) },
     strength: { value: 1 },
     aspect: { value: 1 },
+    // Screen-space fallback: the sharp row, used only where the depth buffer
+    // cannot be read (see TILT_SHIFT_DEPTH_SUPPORTED).
+    focus: { value: TILT_SHIFT_DEFAULT_FOCUS },
+    // The pointer's uv in the same space as vUv. The pixel under it decides the
+    // focus distance.
+    pointer: { value: new THREE.Vector2(0.5, 0.5) },
+    cameraNear: { value: 1 },
+    cameraFar: { value: 1 },
+    // Ground view depth under the tap, in metres along the view axis. Computed in
+    // JS rather than from `pointer.y` here: the two renderers store the pointer in
+    // different UV origins (see applyTiltShiftFocus), so deriving it in the shader
+    // mirrored the row on one of them.
+    groundAtTap: { value: 1 },
+    focusRange: { value: 1 },
+    depthInfluence: { value: 0 },
+    // (1, 0) on the horizontal pass, (0, 1) on the vertical one.
+    direction: { value: new THREE.Vector2(0, 1) },
+    // 1 on the pass that finishes the blur, 0 on the first, so the vignette is not
+    // applied twice (and so it is not blurred by the second pass).
+    vignette: { value: 1 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -100,15 +222,47 @@ const TiltShiftShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
+    uniform sampler2D tDepth;
     uniform vec2 resolution;
     uniform float strength;
     uniform float aspect;
+    uniform float focus;
+    uniform vec2 pointer;
+    uniform float cameraNear;
+    uniform float cameraFar;
+    uniform float groundAtTap;
+    uniform float focusRange;
+    uniform float depthInfluence;
+    uniform vec2 direction;
+    uniform float vignette;
     varying vec2 vUv;
 
+    // Orthographic, so the depth buffer is linear in view distance.
+    float viewDepthAt( vec2 uv ) {
+      return cameraNear + texture2D( tDepth, uv ).r * ( cameraFar - cameraNear );
+    }
+
     void main() {
-      float distanceFromCenter = abs(vUv.y - 0.5) * 2.0;
-      float blurAmount = smoothstep(${TILT_SHIFT_BAND_START}, ${TILT_SHIFT_BAND_END}, distanceFromCenter) * strength;
-      vec2 texel = vec2(blurAmount * ${TILT_SHIFT_RADIUS.toFixed(1)}) / resolution;
+      float coc = smoothstep(${TILT_SHIFT_BAND_START}, ${TILT_SHIFT_BAND_END}, abs(vUv.y - focus) * 2.0);
+
+      if ( depthInfluence > 0.0001 ) {
+        // Focus on whatever is under the pointer. Reading it from the copy keeps
+        // this on the GPU; a readback would cost a frame of lag.
+        // Nothing drawn there (sky, or past the far plane): fall back to the ground
+        // behind it, so pointing at the horizon still does something sensible.
+        // min() needs no branch — the sky sample is the far plane, which is always
+        // deeper than the ground. groundAtTap comes from JS because the pointer's
+        // UV origin differs between the two renderers.
+        float pointerDepth = min( viewDepthAt( pointer ), groundAtTap );
+
+        float rise = abs( viewDepthAt( vUv ) - pointerDepth ) / max( focusRange, 1e-3 );
+        coc = mix( coc, smoothstep(${TILT_SHIFT_DOF_SHARP.toFixed(3)}, ${TILT_SHIFT_DOF_BLURRED.toFixed(3)}, rise), depthInfluence );
+      }
+
+      float blurAmount = coc * strength;
+      // Half the radius per pass: two 1D passes of this length give the same 2D
+      // spread as one pass at the full radius, but with taps closer together.
+      vec2 texel = vec2(blurAmount * ${(TILT_SHIFT_RADIUS / 2).toFixed(1)}) / resolution;
 
       vec4 color = texture2D( tDiffuse, vUv );
       if ( blurAmount > 0.0001 ) {
@@ -116,9 +270,11 @@ const TiltShiftShader = {
 ${tiltShiftSampleCode}
       }
 
-      vec2 vignetteUv = (vUv - 0.5) * vec2(aspect, 1.0);
-      float vignette = 1.0 - ${VIGNETTE_STRENGTH.toFixed(3)} * smoothstep(0.28, 0.95, length(vignetteUv));
-      color.rgb *= vignette;
+      if ( vignette > 0.5 ) {
+        vec2 vignetteUv = (vUv - 0.5) * vec2(aspect, 1.0);
+        float shade = 1.0 - ${VIGNETTE_STRENGTH.toFixed(3)} * smoothstep(0.28, 0.95, length(vignetteUv));
+        color.rgb *= shade;
+      }
 
       gl_FragColor = color;
     }
@@ -406,9 +562,24 @@ controls.update();
 // ground is the expensive part to draw.
 const fogState = { strength: 0 };
 
-function updateFog() {
+// Ground geometry shared by the fog band and the tilt shift's sky fallback. For
+// an orthographic camera every ray is parallel, so ground view depth is
+// `focusDepth` at the screen centre and grows linearly by `halfRange` at the top
+// and bottom edges. The tilt shift needs the ground depth under the pointer to
+// fall back on when the pointer is over sky, so it must agree with this.
+function groundViewSpan() {
   const elevationDeg =
     90 - THREE.MathUtils.radToDeg(controls.getPolarAngle());
+  const focusDepth = camera.position.distanceTo(controls.target);
+  const halfHeight = VIEW_SIZE / (2 * camera.zoom);
+  const tanElevation = Math.tan(
+    THREE.MathUtils.degToRad(Math.max(elevationDeg, 1)),
+  );
+  return { elevationDeg, focusDepth, halfRange: halfHeight / tanElevation };
+}
+
+function updateFog() {
+  const { elevationDeg, focusDepth: dm, halfRange } = groundViewSpan();
   const strength = FOG_ALLOWED
     ? (1 -
         THREE.MathUtils.smoothstep(
@@ -423,17 +594,6 @@ function updateFog() {
           FOG_ZOOM_FADE_END,
         ))
     : 0;
-
-  const dm = camera.position.distanceTo(controls.target);
-  // Orthographic rays are parallel, so the ground's view depth is dm at the
-  // screen centre and grows by halfHeight / tan(elevation) at the top edge.
-  // Express the band in fractions of that half-range so it stays pinned to the
-  // screen at every zoom instead of tracking world units.
-  const halfHeight = VIEW_SIZE / (2 * camera.zoom);
-  const tanElevation = Math.tan(
-    THREE.MathUtils.degToRad(Math.max(elevationDeg, 1)),
-  );
-  const halfRange = halfHeight / tanElevation;
 
   let near = ORTHO_FAR;
   let far = ORTHO_FAR * 2;
@@ -475,6 +635,8 @@ function updateFog() {
 }
 
 let tiltShiftPass = null;
+let tiltShiftPassV = null;
+let tiltShiftDepthPass = null;
 let gtaoPass = null;
 const AO_RADIUS = 12;
 const AO_THICKNESS = 22;
@@ -490,11 +652,32 @@ const AO_NONE_ZOOM = 3.2;
 const AO_FULL_ELEVATION = 70;
 const AO_NONE_ELEVATION = 85;
 const MSAA_SAMPLES = 4;
+// Where `WEBGL_multisampled_render_to_texture` exists, three attaches the depth
+// texture straight to the multisampled framebuffer as a multisampled texture, and
+// sampling that with `texture2D` is invalid. Rather than sample something
+// undefined there, skip the depth texture entirely and fall back to the
+// screen-space band; that path is the exception, the blit-resolve path is the norm.
+const TILT_SHIFT_DEPTH_SUPPORTED =
+  renderer.isWebGLRenderer &&
+  !renderer.extensions.has('WEBGL_multisampled_render_to_texture');
+
 const composerTarget = renderer.isWebGLRenderer
   ? new THREE.WebGLRenderTarget(
       window.innerWidth * renderer.getPixelRatio(),
       window.innerHeight * renderer.getPixelRatio(),
-      { type: THREE.HalfFloatType, samples: MSAA_SAMPLES },
+      {
+        type: THREE.HalfFloatType,
+        samples: MSAA_SAMPLES,
+        // Tilt shift reads this to tell depth apart across the frame.
+        // `resolveDepthBuffer` stays at its default so the MSAA depth is blitted
+        // back into the texture after every `RenderPass`.
+        depthTexture: TILT_SHIFT_DEPTH_SUPPORTED
+          ? new THREE.DepthTexture(
+              window.innerWidth * renderer.getPixelRatio(),
+              window.innerHeight * renderer.getPixelRatio(),
+            )
+          : null,
+      },
     )
   : null;
 if (composerTarget) composerTarget.texture.name = 'EffectComposer.rt1';
@@ -569,12 +752,39 @@ function createGTAOPass() {
 
 if (composer) {
   composer.addPass(new RenderPass(scene, camera));
+  // Runs immediately after the scene render, while the depth texture still
+  // belongs to this frame and is not the pass's own output.
+  if (TILT_SHIFT_DEPTH_SUPPORTED) {
+    tiltShiftDepthPass = new TiltShiftDepthPass();
+    tiltShiftDepthPass.enabled = false;
+    composer.addPass(tiltShiftDepthPass);
+  }
   if (AO_ALLOWED && aoEnabled) {
     composer.addPass(createGTAOPass());
   }
+  // Two passes, horizontal then vertical. The composer's ping-pong buffers are the
+  // intermediate, so the separable blur needs no extra target. The first pass also
+  // applies the vignette, which keeps the cost of a frame with tilt shift off at
+  // one pass, exactly as the single-pass version was.
   tiltShiftPass = new ShaderPass(TiltShiftShader);
   tiltShiftPass.uniforms.strength.value = 0;
+  tiltShiftPass.uniforms.direction.value.set(1, 0);
+  tiltShiftPass.uniforms.vignette.value = 1;
+  if (tiltShiftDepthPass) {
+    tiltShiftPass.uniforms.tDepth.value = tiltShiftDepthPass.target.texture;
+  }
   composer.addPass(tiltShiftPass);
+
+  tiltShiftPassV = new ShaderPass(TiltShiftShader);
+  tiltShiftPassV.uniforms.strength.value = 0;
+  tiltShiftPassV.uniforms.direction.value.set(0, 1);
+  tiltShiftPassV.uniforms.vignette.value = 0;
+  tiltShiftPassV.enabled = false;
+  if (tiltShiftDepthPass) {
+    tiltShiftPassV.uniforms.tDepth.value = tiltShiftDepthPass.target.texture;
+  }
+  composer.addPass(tiltShiftPassV);
+
   composer.addPass(new OutputPass());
   composer.setPixelRatio(renderer.getPixelRatio());
   composer.setSize(window.innerWidth, window.innerHeight);
@@ -583,6 +793,11 @@ if (composer) {
 let renderPipeline = null;
 let tiltShiftNodeResolution = null;
 let tiltShiftStrengthNode = null;
+let tiltShiftPointerNode = null;
+let tiltShiftNearNode = null;
+let tiltShiftFarNode = null;
+let tiltShiftGroundAtTapNode = null;
+let tiltShiftFocusRangeNode = null;
 let frameAspectNode = null;
 let renderOutput = null;
 let gtaoNode = null;
@@ -614,8 +829,16 @@ if (isWebGPU) {
   const scenePass = TSL.pass(scene, camera, { samples: MSAA_SAMPLES });
   webgpuScenePass = scenePass;
   const sceneTexture = scenePass.getTextureNode();
+  // Unlike WebGL, the node renderer keeps the scene pass depth as a texture this
+  // output pass can sample directly — no copy needed.
+  const sceneDepthTexture = scenePass.getTextureNode('depth');
   tiltShiftNodeResolution = TSL.uniform(new THREE.Vector2(1, 1));
   tiltShiftStrengthNode = TSL.uniform(0);
+  tiltShiftPointerNode = TSL.uniform(new THREE.Vector2(0.5, 0.5));
+  tiltShiftNearNode = TSL.uniform(camera.near);
+  tiltShiftFarNode = TSL.uniform(camera.far);
+  tiltShiftGroundAtTapNode = TSL.uniform(1);
+  tiltShiftFocusRangeNode = TSL.uniform(1);
   frameAspectNode = TSL.uniform(1);
 
   if (AO_ALLOWED) {
@@ -670,34 +893,71 @@ if (isWebGPU) {
     if (aoEnabled) scenePass.contextNode = webgpuAOContext;
   }
 
-  const tiltShiftNode = TSL.Fn(() => {
-    const uvNode = sceneTexture.uvNode || TSL.uv();
-    const distanceFromCenter = TSL.abs(uvNode.y.sub(0.5)).mul(2.0);
-    const blurAmount = TSL.smoothstep(
-      TILT_SHIFT_BAND_START,
-      TILT_SHIFT_BAND_END,
-      distanceFromCenter,
-    ).mul(tiltShiftStrengthNode);
-    const texel = TSL.vec2(blurAmount.mul(TILT_SHIFT_RADIUS)).div(
-      tiltShiftNodeResolution,
-    );
+  // Same separable blur as the WebGL passes: two 1D taps sets instead of one 7x7
+  // grid, so the taps land ~1.5 px apart instead of 3.3 px and the blur reads as a
+  // gradient rather than ghosted copies. The horizontal pass renders into an RTT,
+  // which is the equivalent of the composer's ping-pong buffer.
+  const tiltShiftBlur = (textureNode, dx, dy) =>
+    TSL.Fn(() => {
+      const uvNode = TSL.uv();
 
-    const color = TSL.vec4(0, 0, 0, 0).toVar();
-    TSL.If(blurAmount.greaterThan(0.0001), () => {
-      let blur = TSL.vec4(0, 0, 0, 0);
-      for (const { x, y, weight } of TILT_SHIFT_KERNEL) {
-        blur = blur.add(
-          sceneTexture
-            .sample(uvNode.add(TSL.vec2(x, y).mul(texel)))
-            .mul(weight),
+      // Two depth fetches per pixel, so they sit behind the strength check: with
+      // tilt shift off this node still runs whenever AO keeps the pipeline alive,
+      // and sampling depth there is pure waste.
+      const blurAmount = TSL.float(0).toVar();
+      TSL.If(tiltShiftStrengthNode.greaterThan(0.0001), () => {
+        // Same depth of field as the WebGL shader: blur by the pixel's distance
+        // from the focus distance under the pointer, not by its screen row. The
+        // camera is orthographic, so the depth buffer is linear in view distance.
+        const viewDepthAt = (uv) =>
+          tiltShiftNearNode.add(
+            sceneDepthTexture
+              .sample(uv)
+              .r.mul(tiltShiftFarNode.sub(tiltShiftNearNode)),
+          );
+        // min() picks the ground when the pointer is over sky: the sky sample sits
+        // at the far plane, which is always deeper than the ground behind it.
+        // groundAtTap comes from JS because the pointer's UV origin differs
+        // between the two renderers.
+        const pointerDepth = TSL.min(
+          viewDepthAt(tiltShiftPointerNode),
+          tiltShiftGroundAtTapNode,
         );
-      }
-      color.assign(blur);
-    }).Else(() => {
-      color.assign(sceneTexture.sample(uvNode));
-    });
-    return color;
-  })();
+        const rise = TSL.abs(viewDepthAt(uvNode).sub(pointerDepth)).div(
+          TSL.max(tiltShiftFocusRangeNode, 1e-3),
+        );
+        const coc = TSL.smoothstep(
+          TILT_SHIFT_DOF_SHARP,
+          TILT_SHIFT_DOF_BLURRED,
+          rise,
+        );
+        blurAmount.assign(coc.mul(tiltShiftStrengthNode));
+      });
+
+      const texel = TSL.vec2(blurAmount.mul(TILT_SHIFT_RADIUS / 2)).div(
+        tiltShiftNodeResolution,
+      );
+      const direction = TSL.vec2(dx, dy);
+
+      const color = TSL.vec4(0, 0, 0, 0).toVar();
+      TSL.If(blurAmount.greaterThan(0.0001), () => {
+        let blur = TSL.vec4(0, 0, 0, 0);
+        for (const { offset, weight } of TILT_SHIFT_KERNEL) {
+          blur = blur.add(
+            textureNode
+              .sample(uvNode.add(direction.mul(offset).mul(texel)))
+              .mul(weight),
+          );
+        }
+        color.assign(blur);
+      }).Else(() => {
+        color.assign(textureNode.sample(uvNode));
+      });
+      return color;
+    })();
+
+  const tiltShiftPassH = TSL.rtt(tiltShiftBlur(sceneTexture, 1, 0));
+  const tiltShiftNode = tiltShiftBlur(tiltShiftPassH, 0, 1);
 
   const vignetteUv = TSL.uv()
     .sub(0.5)
@@ -728,6 +988,7 @@ function updateTiltShiftResolution() {
   const size = new THREE.Vector2();
   renderer.getDrawingBufferSize(size);
   if (tiltShiftPass) tiltShiftPass.uniforms.resolution.value.copy(size);
+  if (tiltShiftPassV) tiltShiftPassV.uniforms.resolution.value.copy(size);
   if (tiltShiftNodeResolution) tiltShiftNodeResolution.value.copy(size);
   updateAOResolution();
 }
@@ -1629,6 +1890,23 @@ function buildViewInfo(label) {
       elevation: fmt(lightingElevationDeg, 1),
       phase: getLightingPhase(),
       exposure: fmt(renderer.toneMappingExposure, 2),
+    },
+    tiltShift: {
+      enabled: tiltShiftEnabled,
+      strength: fmt(tiltShiftStrength, 2),
+      // False means the shader fell back to the screen-space row band (either the
+      // depth texture is unsupported or the zoom fade has the effect off).
+      depthTerm: tiltShiftDebug.depthActive,
+      tap: tiltShiftDebug.tap,
+      focus: {
+        // Ground-plane depth under the tap, in metres along the view axis.
+        center: rounded(tiltShiftDebug.focusCenter),
+        groundAtTap: rounded(tiltShiftDebug.groundAtTap),
+        // Anything within this many metres of the focus distance stays sharp.
+        range: rounded(tiltShiftDebug.focusRange),
+        halfRange: rounded(tiltShiftDebug.halfRange),
+        influence: fmt(tiltShiftDebug.influence, 2),
+      },
     },
     tiles: getTileStats(),
     build: {
@@ -3865,10 +4143,165 @@ if (lightingButton) {
 const tiltShiftButton = document.getElementById('tilt-shift');
 let tiltShiftEnabled = false;
 let tiltShiftStrength = 0;
+// The pointer's uv on the canvas, in the composer's vUv space (y up).
+const tiltShiftPointer = new THREE.Vector2(0.5, TILT_SHIFT_DEFAULT_FOCUS);
+// Last tap and the numbers the shader was given for it, so a "tap does nothing"
+// report can be reproduced exactly. Filled by the pointer handler and by
+// updateTiltShiftDepth(); read by buildViewInfo().
+const tiltShiftDebug = {
+  tap: null,
+  depthActive: false,
+  influence: 0,
+  focusCenter: 0,
+  halfRange: 0,
+  focusRange: 0,
+  groundAtTap: null,
+};
 
-// Tilt shift is a small-scale, overview effect. Fade it out as the camera
-// zooms in and the tile LOD switches to detailed geometry, which reads as
-// mush when blurred.
+// Both blur passes carry the same uniforms; the direction and vignette are fixed
+// per pass at construction.
+function forEachTiltShiftPass(fn) {
+  if (tiltShiftPass) fn(tiltShiftPass);
+  if (tiltShiftPassV) fn(tiltShiftPassV);
+}
+
+// The focus is whatever is under the pointer: the depth at that pixel becomes the
+// focus distance, and everything at a different depth blurs. This only reads
+// pointer positions; MapControls still owns the pan/zoom gestures.
+function applyTiltShiftFocus(point) {
+  const x = THREE.MathUtils.clamp(point.x, 0, 1);
+  const y = THREE.MathUtils.clamp(point.y, 0, 1);
+  if (x === tiltShiftPointer.x && y === tiltShiftPointer.y) return;
+  tiltShiftPointer.set(x, y);
+
+  forEachTiltShiftPass((pass) => {
+    pass.uniforms.pointer.value.copy(tiltShiftPointer);
+    // Screen-space fallback for renderers that cannot read depth: the sharp row
+    // under the pointer.
+    pass.uniforms.focus.value = y;
+  });
+  if (tiltShiftPointerNode) {
+    // The composer's vUv is bottom-origin but the node renderer's screenUV is
+    // top-origin, so the vertical coordinate flips between them.
+    tiltShiftPointerNode.value.set(x, 1 - y);
+  }
+  if (tiltShiftEnabled) requestFrame();
+}
+
+function updateTiltShiftFocusFromEvent(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const x = (event.clientX - rect.left) / rect.width;
+  const y = 1 - (event.clientY - rect.top) / rect.height;
+  // Kept for the debug snapshot: a tapped focus that "does nothing" is usually a
+  // question of where it landed, so record the tap in canvas pixels as well as uv.
+  tiltShiftDebug.tap = {
+    client: { x: Math.round(event.clientX), y: Math.round(event.clientY) },
+    canvas: {
+      x: Math.round(event.clientX - rect.left),
+      y: Math.round(event.clientY - rect.top),
+    },
+    uv: { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) },
+  };
+  applyTiltShiftFocus({ x, y });
+}
+
+// A tap sets the focus and keeps it; a drag is a pan and must leave the focus
+// alone, so the focus is only applied on release when the pointer barely moved.
+// Multi-touch is excluded for the same reason — a pinch or twist is not a tap.
+const tiltShiftPointers = new Set();
+let tiltShiftTap = null;
+
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  tiltShiftPointers.add(event.pointerId);
+  tiltShiftTap =
+    tiltShiftPointers.size === 1
+      ? { id: event.pointerId, x: event.clientX, y: event.clientY }
+      : null;
+});
+
+renderer.domElement.addEventListener('pointermove', (event) => {
+  if (!tiltShiftTap || tiltShiftTap.id !== event.pointerId) return;
+  if (
+    Math.hypot(event.clientX - tiltShiftTap.x, event.clientY - tiltShiftTap.y) >
+    TILT_SHIFT_TAP_SLOP
+  ) {
+    tiltShiftTap = null;
+  }
+});
+
+for (const type of ['pointerup', 'pointercancel']) {
+  renderer.domElement.addEventListener(type, (event) => {
+    tiltShiftPointers.delete(event.pointerId);
+    if (!tiltShiftTap || tiltShiftTap.id !== event.pointerId) return;
+    const isTap =
+      type === 'pointerup' &&
+      Math.hypot(
+        event.clientX - tiltShiftTap.x,
+        event.clientY - tiltShiftTap.y,
+      ) <= TILT_SHIFT_TAP_SLOP;
+    tiltShiftTap = null;
+    if (isTap) updateTiltShiftFocusFromEvent(event);
+  });
+}
+
+// The depth uniforms move with the camera even when the zoom fade does not, so
+// they are pushed every drawn frame rather than alongside the strength.
+function updateTiltShiftDepth() {
+  if (!tiltShiftPass && !tiltShiftPointerNode) return;
+  const { focusDepth, halfRange } = groundViewSpan();
+  // Scale the band from the visible depth range so a neighbourhood stays sharp,
+  // with a floor for the straight-down case where the ground span collapses.
+  const halfHeight = VIEW_SIZE / (2 * camera.zoom);
+  const focusRange = Math.max(
+    halfRange * TILT_SHIFT_DOF_SPAN,
+    halfHeight * TILT_SHIFT_DOF_MIN,
+  );
+  const strengthOn = tiltShiftStrength > 0.0001;
+  // Ground-plane depth under the tap, along the view axis. Shared by both
+  // renderers and by the debug snapshot, so the shader fallback is the number the
+  // report shows. Derived here, not in the shader: the pointer is stored in a
+  // different UV origin per renderer, and doing the row arithmetic in the shader
+  // mirrored it on WebGPU — the focus landed ~275 m off, which is wider than the
+  // focal band, so taps near the top blurred what they pointed at.
+  const groundAtTap = focusDepth + (tiltShiftPointer.y * 2 - 1) * halfRange;
+
+  const useDepth = TILT_SHIFT_DEPTH_SUPPORTED && strengthOn;
+  forEachTiltShiftPass((pass) => {
+    const uniforms = pass.uniforms;
+    uniforms.cameraNear.value = camera.near;
+    uniforms.cameraFar.value = camera.far;
+    uniforms.groundAtTap.value = groundAtTap;
+    uniforms.focusRange.value = focusRange;
+    uniforms.depthInfluence.value = useDepth ? 1 : 0;
+  });
+  // No point paying for the half-res copy when the term contributes nothing.
+  if (tiltShiftDepthPass) tiltShiftDepthPass.enabled = useDepth;
+  if (tiltShiftPointerNode) {
+    tiltShiftNearNode.value = camera.near;
+    tiltShiftFarNode.value = camera.far;
+    tiltShiftGroundAtTapNode.value = groundAtTap;
+    tiltShiftFocusRangeNode.value = focusRange;
+  }
+
+  // Snapshot what the shader was handed, for both renderers. `groundAtTap` is the
+  // ground-plane depth under the tap — the value the shader falls back to when the
+  // tap hits sky, and the reason taps a few hundred pixels apart look alike. It is
+  // not the depth actually sampled there, which would need a GPU readback.
+  // `depthActive` is what actually decides the look, so it must be reported per
+  // path rather than from the WebGL pass alone: WebGPU always has the scene depth.
+  tiltShiftDebug.depthActive = tiltShiftPass
+    ? TILT_SHIFT_DEPTH_SUPPORTED && strengthOn
+    : strengthOn;
+  tiltShiftDebug.influence = tiltShiftDebug.depthActive ? 1 : 0;
+  tiltShiftDebug.focusCenter = focusDepth;
+  tiltShiftDebug.halfRange = halfRange;
+  tiltShiftDebug.focusRange = focusRange;
+  tiltShiftDebug.groundAtTap = groundAtTap;
+}
+
+// Tilt shift is a small-scale effect. Fade it out as the camera zooms in and the
+// tile LOD switches to detailed geometry, which reads as mush when blurred.
 function updateTiltShiftStrength() {
   const strength = tiltShiftEnabled
     ? 1 -
@@ -3880,7 +4313,12 @@ function updateTiltShiftStrength() {
     : 0;
   if (strength === tiltShiftStrength) return;
   tiltShiftStrength = strength;
-  if (tiltShiftPass) tiltShiftPass.uniforms.strength.value = strength;
+  forEachTiltShiftPass((pass) => {
+    pass.uniforms.strength.value = strength;
+  });
+  // With the blur off, the second pass would only copy the first pass's output, so
+  // skip it and keep a tilt-shift-off frame at a single pass.
+  if (tiltShiftPassV) tiltShiftPassV.enabled = strength > 0.0001;
   if (tiltShiftStrengthNode) tiltShiftStrengthNode.value = strength;
 }
 
@@ -4541,12 +4979,13 @@ function animate() {
 
   const frameAspect = window.innerWidth / window.innerHeight;
   updateTiltShiftStrength();
+  updateTiltShiftDepth();
   updateAOStrength();
   aoUpdateThisFrame = aoStrength > 0.001 && aoDirty;
   if (aoBlurNode) aoBlurNode.textureNeedsUpdate = aoUpdateThisFrame;
-  if (tiltShiftPass) {
-    tiltShiftPass.uniforms.aspect.value = frameAspect;
-  }
+  forEachTiltShiftPass((pass) => {
+    pass.uniforms.aspect.value = frameAspect;
+  });
   if (frameAspectNode) frameAspectNode.value = frameAspect;
 
   const usePost =

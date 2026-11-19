@@ -329,15 +329,125 @@ tiles load — which makes on-screen verification impossible.
   a very tall tower at a very low pitch can still fall outside 600 m.
 - Bridges are painted into the basemap and intentionally do not get separate
   shadow meshes.
-- Tilt shift is optional and blurs the top/bottom bands based on
-  `abs(uv.y - 0.5)`. It uses an `EffectComposer` `ShaderPass` on the WebGL
-  renderer and a TSL `RenderPipeline` pass on WebGPU, since the classic
-  composer does not run on `WebGPURenderer`. The same pass also applies the
-  screen vignette (`VIGNETTE_STRENGTH`, 0.06).
+- Tilt shift is optional and is a real depth of field: blur grows with a pixel's
+  distance from the focus *distance*, read from the depth buffer under the
+  pointer. So a building behind the one you point at blurs even when it sits at
+  the same height on screen. It uses an `EffectComposer` `ShaderPass` on the WebGL
+  renderer and a TSL `RenderPipeline` pass on WebGPU, since the classic composer
+  does not run on `WebGPURenderer`. The same pass also applies the screen vignette
+  (`VIGNETTE_STRENGTH`, 0.06).
+- The focus is whatever you tap, and it stays there. It is set on `pointerup` only
+  when the pointer moved less than `TILT_SHIFT_TAP_SLOP` pixels, so a drag pans the
+  map without disturbing the focus; multi-touch never counts as a tap. The shader
+  samples the depth copy at that texel — on the GPU, because a CPU readback would
+  cost a frame of lag. `min(sample, groundAtPointer)` handles tapping the sky: the
+  sky sample is the far plane, always deeper than the ground behind it.
+- The focal half-band is `max(halfRange * TILT_SHIFT_DOF_SPAN,
+  VIEW_SIZE / 2 / zoom * TILT_SHIFT_DOF_MIN)`, i.e. a fraction of the depth range
+  actually visible on screen. It has to be generous: at pitch 15 the ground spans
+  ~490 m, and sizing the band from the view height instead (~110 m) blurred the
+  buildings next door, which is the opposite of the point. The floor covers the
+  straight-down case, where `halfRange` collapses and only building height
+  separates depths.
+- The depth term uses its own rise thresholds, `TILT_SHIFT_DOF_SHARP` (0.3) to
+  `TILT_SHIFT_DOF_BLURRED` (1.0), not `TILT_SHIFT_BAND_*`. A band that starts
+  blurring at 0.16 of the half-range is right for a screen band but far too eager
+  for depth: it left no clearly-sharp plateau, so everything but the tapped object
+  softened. Below 0.3 now means "in focus" and the blur only ramps after that.
+- **The two renderers need opposite pointer values.** The composer's `vUv` is
+  bottom-origin but the node renderer's `screenUV` is top-origin, so
+  `applyTiltShiftFocus()` writes `pointer` to the shader and `(x, 1 - y)` to
+  `tiltShiftPointerNode`. Passing the same value to both puts the focus on the
+  wrong side of the screen on WebGPU — easy to miss, because a symmetric
+  `abs(uv.y - 0.5)` band hides the difference entirely.
+- **Derive `groundAtTap` in JS, not in the shader.** The sky fallback is
+  `min(depthAtPointer, groundAtTap)`, and `groundAtTap` is
+  `center + (uv.y * 2 - 1) * halfRange` — arithmetic defined on the *bottom-origin*
+  row. Doing it inside the node renderer, whose pointer is already flipped, mirrored
+  the row: a tap at the top of the screen got the ground depth of the bottom, an
+  error of ~275 m at a tilt, which is wider than the focal band, so the tap blurred
+  exactly what it pointed at. It is now computed once in `updateTiltShiftDepth()`
+  and passed to both renderers (and to the debug snapshot), so the number reported
+  is the number used.
+- WebGL cannot read the composer's depth where the blur pass runs. The composer
+  ping-pongs two targets, so the current frame's depth only exists in the target
+  `RenderPass` wrote, and by blur time that target is the one being written —
+  sampling it would be a feedback loop. `TiltShiftDepthPass` therefore sits
+  between `RenderPass` and GTAO and copies the raw depth into a half-resolution
+  float texture. It needs `depthTexture` on the composer target, whose MSAA depth
+  three resolves by blit; where `WEBGL_multisampled_render_to_texture` exists that
+  resolve is skipped and the depth is attached multisampled, which cannot be
+  sampled, so `TILT_SHIFT_DEPTH_SUPPORTED` turns the depth term off there and the
+  shader falls back to a screen-space row band through the same `pointer.y`.
+  WebGPU samples `scenePass`'s depth texture directly and needs no copy.
+- The depth term is a true depth of field, so **flat ground is not exempt**: with
+  the focus on a near foreground object, distant ground blurs too, which is the
+  point. This is why it is not simply the fog's band again.
+- It is cheap enough to leave on every quality tier, and deliberately is. Measured
+  on an M2 at DPR 1.5 (`high`), alternating in one session so the view and the
+  blurred area are identical: 3.53 ms with tilt shift off, 3.56 ms for the band
+  alone, 3.56 ms with the depth term. The depth term therefore costs ~nothing —
+  it is one extra texture fetch per pixel, while the kernel dominates and scales
+  with how much of the screen is blurred. An earlier +0.2 ms reading was an
+  artefact of comparing different views and paying shader recompiles; do not
+  re-derive a tier gate from cross-view numbers. Memory is ~0 too: the composer
+  target already allocates a depth attachment, the only addition being the
+  half-res float copy (~2.5 MB at 2205x1125).
+- **The blur is separable, and that is a quality fix as much as a perf one.** It
+  used to be a single 7x7 pass whose taps sat `radius/3` apart — 3.3 px at full
+  radius — so the output read as 49 ghosted copies of the image rather than a
+  gradient, which is what "the blur looks pixelated" turned out to be. Two 1D
+  passes put the taps 1.25 px apart *and* cut the fetches from 49 to 18. Do not
+  collapse it back into one pass to save a pass: that is 2.7x more fetches for a
+  visibly worse result.
+  - WebGL is two `ShaderPass` instances of the same shader with `direction`
+    `(1,0)` then `(0,1)`; the composer's ping-pong is the intermediate, so no
+    extra target. The horizontal pass carries the vignette, so a frame with the
+    effect off is still one pass — the vertical pass is disabled when the
+    strength is 0.
+  - WebGPU cannot ping-pong inside a node graph, so the horizontal pass renders
+    into a `TSL.rtt` and the vertical pass samples it. That target is full-drawing-
+    buffer RGBA16F (~20 MB at 2205x1125, ~6 MB on `low` at DPR 1): the one real
+    memory cost of the effect.
+  - Tap count is `TILT_SHIFT_TAPS` (9). 13 was measured against it and is visually
+    identical, so the extra fetches buy nothing. Do not make it tier-dependent
+    without solving the runtime switch: `applyQuality()` swaps tiers without
+    rebuilding the shader or the node graph, so a per-tier tap count would need
+    both to be rebuilt on change.
+  - Radius is halved per pass (`TILT_SHIFT_RADIUS / 2`) so the two 1D passes have
+    the same 2D extent as the old single pass.
+- **What actually costs on the low tier is the blur itself, and mobile cannot run
+  the depth term anyway.** `low` exists for iOS Safari, which is where the second
+  finding bites: `WEBGL_multisampled_render_to_texture` is an Apple extension, so
+  on iOS the depth texture is attached multisampled and
+  `TILT_SHIFT_DEPTH_SUPPORTED` is false — the shader falls back to the screen-space
+  band and the passes are a plain separable blur, no depth work at all. If `low`
+  needs to get cheaper, the lever is the blur (fewer taps, or a half-res render
+  composited back at full res); the depth term is not, and gating it by tier
+  changes nothing on the device that matters.
+- On WebGPU the two depth fetches sit behind `tiltShiftStrengthNode > 0`. Without
+  that guard they run on every frame the pipeline is alive, including frames AO
+  keeps alive while tilt shift is off.
+- `buildViewInfo()` carries a `tiltShift` block so a "my tap did nothing" report
+  can be reproduced: the tap in client/canvas pixels and uv, then `depthTerm`
+  (false means the screen-space fallback ran), `focus.center`, `focus.groundAtTap`,
+  `focus.range`, `focus.halfRange`, and `focus.influence`. Fill it from the shared
+  part of `updateTiltShiftDepth()`, **not** from inside the `if (tiltShiftPass)`
+  block: that pass only exists on WebGL, so doing it there reported zeros and
+  `depthTerm: false` on WebGPU while the effect was running fine.
+  `groundAtTap` is the ground-plane depth under the tap — the value the shader
+  falls back to when the tap hits sky — not the depth actually sampled there,
+  which would need a GPU readback. Comparing `groundAtTap` across taps shows why
+  edge taps feel inert: the whole ground plane spans only `±halfRange` about
+  `center`, so taps a few hundred pixels apart differ by a fraction of `range`.
 - Tilt shift is LOD-driven: `updateTiltShiftStrength()` fades it from full
-  strength at `camera.zoom <= 3` to zero at `>= 10`, because detailed tile
+  strength at `camera.zoom <= 5` to zero at `>= 18`, because detailed tile
   geometry reads as mush when blurred. The strength therefore varies between
-  0 and 1, not just on/off.
+  0 and 1, not just on/off. The range used to end at 10, which left the effect at
+  roughly a quarter strength in the mid-zoom views (`cameraZoom` 7-8) where it is
+  actually wanted. The depth uniforms are pushed separately by
+  `updateTiltShiftDepth()` because they move with the camera even when the
+  zoom-driven strength does not.
 - The composer/RenderPipeline runs whenever AO is on or the tilt-shift
   strength is above zero. On `low` quality (AO off) at high zoom, where the
   LOD has faded tilt shift out, the frame is rendered directly.
@@ -475,8 +585,13 @@ Renderer-specific code is intentionally limited to:
 - `SHADOW_CATCHER_OPACITY`, tuned per backend (`0.56` WebGL, `0.7` WebGPU) so
   the shadow catcher looks the same;
 - tilt shift and vignette: `EffectComposer`/`ShaderPass` on WebGL and a TSL
-  `RenderPipeline` pass on WebGPU. Both share `TILT_SHIFT_KERNEL` and
-  `VIGNETTE_STRENGTH`, so the result is identical;
+  `RenderPipeline` pass on WebGPU. Both share `TILT_SHIFT_KERNEL`,
+  `TILT_SHIFT_TAPS`, `VIGNETTE_STRENGTH`, and the depth-of-field maths, so the
+  result is identical. Both run the same two separable 1D passes; only the
+  intermediate differs (composer ping-pong on WebGL, an `rtt` on WebGPU). The
+  depth differs in plumbing only: WebGL copies it into a half-res texture in
+  `TiltShiftDepthPass`, WebGPU samples the scene pass depth directly. The pointer
+  needs the `1 - y` flip described above because the two UV origins differ;
 - ambient occlusion: `GTAOPass` on WebGL and `GTAONode` on WebGPU, sharing
   `AO_RADIUS`, `AO_THICKNESS`, samples, and scale;
 - reflective water: `webgl-water.js` on WebGL and `webgpu-water.js` plus
